@@ -1,0 +1,306 @@
+.page {
+  --bg: #0c0f1a;
+  --surface-1: #141826;
+  --surface-2: #1c2030;
+  --surface-3: #252a3d;
+  --border: #2a2f45;
+  --gold: #c9a84c;
+  --gold-light: #f0d080;
+  --gold-deep: #a8862c;
+  --green: #00d084;
+  --red: #ff4d6d;
+  --text-primary: #f2f0ea;
+  --text-muted: #8b8fa3;
+
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text-primary);
+  font-family: var(--font-dm-sans), sans-serif;
+  padding: 32px 24px 64px;
+}
+
+.mono {
+  font-family: var(--font-dm-mono), monospace;
+}
+
+/* ---------- token gate ---------- */
+.gate {
+  max-width: 420px;
+  margin: 18vh auto 0;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 40px 32px;
+  text-align: center;
+}
+.gateTitle {
+  font-family: var(--font-playfair), serif;
+  font-size: 28px;
+  letter-spacing: 0.06em;
+  color: var(--gold-light);
+  margin: 0 0 8px;
+}
+.gateSubtitle {
+  color: var(--text-muted);
+  font-size: 14px;
+  margin: 0 0 24px;
+}
+.gateForm {
+  display: flex;
+  gap: 8px;
+}
+.gateInput {
+  flex: 1;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  color: var(--text-primary);
+  font-family: var(--font-dm-mono), monospace;
+  font-size: 13px;
+}
+.gateInput:focus {
+  outline: 2px solid var(--gold);
+  outline-offset: 1px;
+}
+.gateButton {
+  background: var(--gold);
+  color: #1a1508;
+  border: none;
+  border-radius: 6px;
+  padding: 10px 18px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.gateButton:hover {
+  background: var(--gold-light);
+}
+.errorText {
+  color: var(--red);
+  font-size: 13px;
+  margin-top: 16px;
+}
+
+/* ---------- header ---------- */
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 20px;
+  margin-bottom: 24px;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.title {
+  font-family: var(--font-playfair), serif;
+  font-size: 32px;
+  letter-spacing: 0.08em;
+  color: var(--gold-light);
+  margin: 0;
+}
+.subtitle {
+  color: var(--text-muted);
+  font-size: 13px;
+  margin: 4px 0 0;
+}
+.banner {
+  background: rgba(255, 77, 109, 0.12);
+  border: 1px solid var(--red);
+  color: var(--red);
+  border-radius: 8px;
+  padding: 10px 16px;
+  font-size: 13px;
+  margin-bottom: 20px;
+}
+
+/* ---------- stat tiles ---------- */
+.statGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 14px;
+  margin-bottom: 28px;
+}
+.statTile {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.statTileWarning {
+  border-color: var(--gold);
+  background: linear-gradient(180deg, rgba(201, 168, 76, 0.08), transparent 60%);
+}
+.statLabel {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+}
+.statValue {
+  font-family: var(--font-dm-mono), monospace;
+  font-size: 22px;
+  font-weight: 500;
+}
+
+/* ---------- panels ---------- */
+.panel {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px 22px;
+  margin-bottom: 20px;
+  overflow-x: auto;
+}
+.panelTitle {
+  font-family: var(--font-dm-sans), sans-serif;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--gold-light);
+  text-transform: uppercase;
+  margin: 0 0 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* ---------- tables ---------- */
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  min-width: 640px;
+}
+.table th {
+  text-align: left;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+}
+.table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--surface-2);
+  vertical-align: middle;
+}
+.rowWarning {
+  background: rgba(201, 168, 76, 0.1);
+  box-shadow: inset 3px 0 0 var(--gold);
+}
+.emptyRow {
+  text-align: center;
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 18px;
+}
+.detailCell {
+  font-family: var(--font-dm-mono), monospace;
+  font-size: 11px;
+  color: var(--text-muted);
+  max-width: 480px;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- badges (siempre texto + color, nunca color solo) ---------- */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.badge_ok {
+  background: rgba(0, 208, 132, 0.14);
+  color: var(--green);
+  border: 1px solid rgba(0, 208, 132, 0.4);
+}
+.badge_warning {
+  background: rgba(201, 168, 76, 0.16);
+  color: var(--gold-light);
+  border: 1px solid rgba(201, 168, 76, 0.45);
+}
+.badge_critical {
+  background: rgba(255, 77, 109, 0.14);
+  color: var(--red);
+  border: 1px solid rgba(255, 77, 109, 0.4);
+}
+.badge_neutral {
+  background: rgba(139, 143, 163, 0.14);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+.badge_gold {
+  background: rgba(201, 168, 76, 0.16);
+  color: var(--gold-light);
+  border: 1px solid rgba(201, 168, 76, 0.45);
+}
+.badge_buy {
+  background: rgba(0, 208, 132, 0.14);
+  color: var(--green);
+  border: 1px solid rgba(0, 208, 132, 0.4);
+}
+.badge_sell {
+  background: rgba(255, 77, 109, 0.14);
+  color: var(--red);
+  border: 1px solid rgba(255, 77, 109, 0.4);
+}
+
+/* ---------- settings editor ---------- */
+.settingsGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 14px;
+  margin-bottom: 16px;
+}
+.settingsField {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.settingsInput {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: var(--text-primary);
+  font-family: var(--font-dm-mono), monospace;
+  font-size: 13px;
+}
+.settingsInput:focus {
+  outline: 2px solid var(--gold);
+  outline-offset: 1px;
+}
+.saveButton {
+  background: var(--gold);
+  color: #1a1508;
+  border: none;
+  border-radius: 6px;
+  padding: 9px 20px;
+  font-weight: 700;
+  font-size: 13px;
+  cursor: pointer;
+}
+.saveButton:hover {
+  background: var(--gold-light);
+}
+.saveButton:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+.hint {
+  color: var(--text-muted);
+  font-size: 11px;
+  margin: 10px 0 0;
+}

@@ -11,10 +11,17 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "invalid token" }, { status: 401 });
   }
 
-  const [settings, pendingCountRes, auditRes, dayCountsRes, lastClaimRes] = await Promise.all([
+  const [settings, pendingCountRes, auditRes, signalsRes, dayCountsRes, lastClaimRes] = await Promise.all([
     getSettings(),
     supabase.from("signals").select("id", { count: "exact", head: true }).eq("status", "pending"),
     supabase.from("audit").select("*").order("created_at", { ascending: false }).limit(50),
+    supabase
+      .from("signals")
+      .select(
+        "id, action, symbol, tf, grade, price, sl, tp1, tp2, status, auth_symbol_count, auth_global_count, auth_threshold_exceeded, error, duplicate_of, created_at",
+      )
+      .order("created_at", { ascending: false })
+      .limit(50),
     supabase.rpc("today_counts"),
     supabase.from("signals").select("claimed_at").not("claimed_at", "is", null).order("claimed_at", { ascending: false }).limit(1).maybeSingle(),
   ]);
@@ -33,6 +40,7 @@ export async function GET(req: NextRequest) {
     ok: true,
     settings,
     pending_count: pendingCountRes.count ?? 0,
+    recent_signals: signalsRes.data ?? [],
     recent_audit: auditRes.data ?? [],
     day_counts: dayCounts,
     global_count: globalCount,
