@@ -1,0 +1,109 @@
+import "server-only";
+import { timingSafeEqual } from "node:crypto";
+import { supabase } from "./supabase";
+
+export type SettingsRow = {
+  id: number;
+  symbol_threshold: number;
+  global_threshold: number;
+  freshness_seconds: number;
+  queue_ttl_seconds: number;
+  updated_at: string;
+  updated_by: string | null;
+};
+
+/** Fila de la tabla signals tal cual la devuelve Supabase (snake_case). */
+export type SignalRow = {
+  id: string;
+  raw: unknown;
+  account_id: string | null;
+  action: "BUY_DUAL" | "SELL_DUAL" | "CANCEL_ALL";
+  symbol: string;
+  tf: string | null;
+  type: string | null;
+  grade: "ELITE" | "STANDARD" | null;
+  impulse_atr: number | null;
+  price: number | null;
+  sl: number | null;
+  tp1: number | null;
+  tp2: number | null;
+  lots1: number | null;
+  lots2: number | null;
+  risk_usd: number | null;
+  ts_signal: number;
+  origin_symbol_count: number | null;
+  origin_global_count: number | null;
+  origin_threshold_exceeded: boolean | null;
+  auth_symbol_count: number | null;
+  auth_global_count: number | null;
+  auth_threshold_exceeded: boolean | null;
+  symbol_threshold_snapshot: number | null;
+  global_threshold_snapshot: number | null;
+  status: "pending" | "claimed" | "notified" | "rejected_technical" | "expired" | "error";
+  error: string | null;
+  duplicate_of: string | null;
+  claimed_at: string | null;
+  notified_at: string | null;
+  created_at: string;
+};
+
+export async function getSettings(): Promise<SettingsRow> {
+  const { data, error } = await supabase.from("settings").select("*").eq("id", 1).single();
+  if (error || !data) {
+    throw new Error(`No se pudo leer settings: ${error?.message ?? "fila no encontrada"}`);
+  }
+  return data as SettingsRow;
+}
+
+export function isFresh(tsSignalMs: number, freshnessSeconds: number, nowMs: number): boolean {
+  return nowMs - tsSignalMs <= freshnessSeconds * 1000;
+}
+
+/** Comparación de tokens en tiempo constante (evita timing attacks). */
+export function safeTokenEquals(provided: string | null, expected: string | undefined): boolean {
+  if (!provided || !expected) return false;
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
+
+/**
+ * Traduce una fila de `signals` (entrada) al payload que consume el EA:
+ * mismo contrato que emite Pine, pero con los conteos/umbral/flag
+ * SOBREESCRITOS por los valores autoritativos de Supabase.
+ */
+export function toEaPayload(row: SignalRow) {
+  if (row.action === "CANCEL_ALL") {
+    return {
+      id: row.id,
+      account_id: row.account_id,
+      action: row.action,
+      symbol: row.symbol,
+      tf: row.tf,
+      timestamp: row.ts_signal,
+    };
+  }
+
+  return {
+    id: row.id,
+    account_id: row.account_id,
+    action: row.action,
+    symbol: row.symbol,
+    tf: row.tf,
+    type: row.type,
+    grade: row.grade,
+    impulse_atr: row.impulse_atr,
+    price: row.price,
+    sl: row.sl,
+    partial_1: { lots: row.lots1, tp: row.tp1 },
+    partial_2: { lots: row.lots2, tp: row.tp2 },
+    risk_usd: row.risk_usd,
+    current_symbol_count: row.auth_symbol_count,
+    symbol_threshold: row.symbol_threshold_snapshot,
+    current_global_count: row.auth_global_count,
+    global_threshold: row.global_threshold_snapshot,
+    threshold_exceeded: row.auth_threshold_exceeded,
+    timestamp: row.ts_signal,
+  };
+}
