@@ -1,4 +1,3 @@
-import "server-only";
 import { timingSafeEqual } from "node:crypto";
 import { supabase } from "./supabase";
 
