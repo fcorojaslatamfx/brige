@@ -105,3 +105,8 @@ export const changeRoleSchema = z.object({
 export const revokeUserSchema = z.object({
   user_id: z.string().uuid(),
 });
+
+/** Body que acepta POST /api/auth/forgot-password (sin sesión, ver README). */
+export const forgotPasswordSchema = z.object({
+  email: z.string().email(),
+});

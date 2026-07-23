@@ -3,16 +3,27 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { createSupabaseBrowserClient } from "@/lib/supabase-browser";
-import styles from "../status/status.module.css";
+import { PESSARO_LOGO_DATA_URI } from "@/lib/pessaro-logo";
+import styles from "./login.module.css";
+
+type Mode = "login" | "forgot";
 
 export default function LoginPage() {
   const router = useRouter();
+  const [mode, setMode] = useState<Mode>("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  async function handleSubmit(e: React.FormEvent) {
+  function toggleMode() {
+    setMode((m) => (m === "login" ? "forgot" : "login"));
+    setError(null);
+    setMessage(null);
+  }
+
+  async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
     setError(null);
@@ -30,36 +41,88 @@ export default function LoginPage() {
     router.refresh();
   }
 
+  async function handleForgot(e: React.FormEvent) {
+    e.preventDefault();
+    setLoading(true);
+    setError(null);
+    setMessage(null);
+
+    try {
+      await fetch("/api/auth/forgot-password", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+    } catch {
+      // el mensaje de abajo es genérico a propósito, no depende del resultado real
+    }
+
+    setMessage("Si el correo tiene acceso al panel, te enviamos un enlace para restablecer tu contraseña.");
+    setLoading(false);
+  }
+
   return (
     <div className={styles.page}>
-      <div className={styles.gate}>
-        <h1 className={styles.gateTitle}>PESSARO BRIDGE</h1>
-        <p className={styles.gateSubtitle}>Panel de administrador — ingresa con tu cuenta</p>
-        <form onSubmit={handleSubmit} className={styles.gateForm} style={{ flexDirection: "column" }}>
-          <input
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="correo@ejemplo.com"
-            className={styles.gateInput}
-            autoComplete="email"
-            autoFocus
-            required
-          />
-          <input
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            placeholder="Contraseña"
-            className={styles.gateInput}
-            autoComplete="current-password"
-            required
-          />
-          <button type="submit" className={styles.gateButton} disabled={loading}>
-            {loading ? "Ingresando…" : "Entrar"}
-          </button>
-        </form>
+      <div className={styles.backdrop} />
+      <div className={styles.backdropOverlay} />
+      <div className={styles.card}>
+        <div className={styles.logoWrap}>
+          <img src={PESSARO_LOGO_DATA_URI} alt="Pessaro Capital" className={styles.logo} />
+        </div>
+        <h1 className={styles.title}>PESSARO BRIDGE</h1>
+        <p className={styles.subtitle}>
+          {mode === "login" ? "Panel de administrador — ingresa con tu cuenta" : "Recuperar acceso al panel"}
+        </p>
+
+        {mode === "login" ? (
+          <form onSubmit={handleLogin} className={styles.form}>
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="correo@ejemplo.com"
+              className={styles.input}
+              autoComplete="email"
+              autoFocus
+              required
+            />
+            <input
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="Contraseña"
+              className={styles.input}
+              autoComplete="current-password"
+              required
+            />
+            <button type="submit" className={styles.button} disabled={loading}>
+              {loading ? "Ingresando…" : "Entrar"}
+            </button>
+          </form>
+        ) : (
+          <form onSubmit={handleForgot} className={styles.form}>
+            <input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="correo@ejemplo.com"
+              className={styles.input}
+              autoComplete="email"
+              autoFocus
+              required
+            />
+            <button type="submit" className={styles.button} disabled={loading}>
+              {loading ? "Enviando…" : "Enviar enlace de recuperación"}
+            </button>
+          </form>
+        )}
+
+        <button type="button" onClick={toggleMode} className={styles.linkButton}>
+          {mode === "login" ? "¿Olvidaste tu contraseña?" : "Volver a iniciar sesión"}
+        </button>
+
         {error && <p className={styles.errorText}>{error}</p>}
+        {message && <p className={styles.successText}>{message}</p>}
       </div>
     </div>
   );
