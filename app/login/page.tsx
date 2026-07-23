@@ -69,8 +69,9 @@ export default function LoginPage() {
         <div className={styles.logoWrap}>
           <img src={PESSARO_LOGO_DATA_URI} alt="Pessaro Capital" className={styles.logo} />
         </div>
-        <h1 className={styles.title}>PESSARO BRIDGE</h1>
-        <p className={styles.subtitle}>
+        <h1 className={styles.title}>Pessaro Capital</h1>
+        <p className={styles.subtitle}>Brige Profesional de Trading</p>
+        <p className={styles.hint}>
           {mode === "login" ? "Panel de administrador — ingresa con tu cuenta" : "Recuperar acceso al panel"}
         </p>
 

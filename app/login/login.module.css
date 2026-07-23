@@ -34,6 +34,7 @@
   background-size: cover;
   background-position: center;
   filter: saturate(0.85) brightness(0.5);
+  opacity: 0.25;
 }
 
 .backdropOverlay {
@@ -49,11 +50,20 @@
   max-width: 400px;
   background: rgba(9, 20, 35, 0.82);
   border: 1px solid rgba(212, 166, 86, 0.25);
-  border-radius: 14px;
+  border-radius: 12px;
   padding: 40px 32px;
   text-align: center;
   backdrop-filter: blur(6px);
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.55);
+}
+
+@media (max-width: 480px) {
+  .card {
+    padding: 32px 20px;
+  }
+  .title {
+    font-size: 24px;
+  }
 }
 
 .logoWrap {
@@ -75,6 +85,7 @@
 .title {
   font-family: var(--font-playfair), serif;
   font-size: 28px;
+  font-weight: 700;
   letter-spacing: 0.06em;
   color: var(--gold-light);
   margin: 0 0 8px;
@@ -83,6 +94,13 @@
 .subtitle {
   color: var(--text-muted);
   font-size: 14px;
+  margin: 0 0 4px;
+}
+
+.hint {
+  color: var(--text-muted);
+  font-size: 12px;
+  opacity: 0.8;
   margin: 0 0 28px;
 }
 

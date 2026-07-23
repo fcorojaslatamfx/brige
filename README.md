@@ -20,6 +20,7 @@ Navegador ◀──────────── /status           (panel de mo
                     ├─── /status/tokens   (ver/regenerar TV_WEBHOOK_TOKEN, EA_TOKEN, OPERATOR_TOKEN)
                     └─── /status/users    (invitar/gestionar usuarios del panel — solo Super Admin)
 /api/users/invite ──▶ [Resend] ──▶ email con link de "configurar contraseña" ──▶ /set-password
+/api/auth/forgot-password ──▶ [Resend] ──▶ email con link de recuperación ──▶ /set-password
 ```
 
 Los tres tokens de integración (`tv_webhook`, `ea`, `operator`) viven en la tabla `tokens` de Supabase, no en env vars — se ven y regeneran desde `/status/tokens` sin redeploy. `/api/webhook`, `/api/signals` y `/api/ack` siguen validando un `?token=` estático (TradingView y MT4 no pueden manejar sesión), ahora leído de esa tabla. `/status` y `/api/settings` exigen sesión Supabase Auth (login); `/api/status` y `/api/settings` además aceptan el `OPERATOR_TOKEN` vigente como credencial alterna para scripts externos.
@@ -48,8 +49,9 @@ Cada señal trae, sobrescritos por Supabase, `current_symbol_count`, `current_gl
 | `app/api/tokens/` | GET/regenerate de los tokens de integración (solo sesión, sin fallback). |
 | `app/api/users/` | GET (lista), `invite`, `role`, `revoke` — gestión de usuarios, solo `super_admin`. |
 | `app/api/cron/cleanup/` | Job diario (Vercel Cron) de limpieza/compactado de auditoría. |
-| `app/login/` | Login del dashboard (correo + contraseña, Supabase Auth). |
-| `app/set-password/` | Página pública donde un usuario invitado define su contraseña (link de Supabase Auth). |
+| `app/login/` | Login del dashboard (correo + contraseña, Supabase Auth), identidad visual Pessaro Capital + link "¿Olvidaste tu contraseña?". |
+| `app/api/auth/forgot-password/` | Reenvía el link de recuperación de Supabase a cuentas existentes en `user_roles` (público, no crea usuarios, no revela si un correo tiene acceso). |
+| `app/set-password/` | Página pública donde un usuario invitado o que recupera su contraseña la define (canjea el token del hash de la URL con `setSession()`). |
 | `app/status/` | Panel de monitoreo con identidad Pessaro Capital. |
 | `app/status/tokens/` | Ver/copiar/regenerar los tres tokens de integración. |
 | `app/status/users/` | Invitar usuarios, cambiar rol, revocar acceso — solo `super_admin`. |
@@ -59,7 +61,8 @@ Cada señal trae, sobrescritos por Supabase, `current_symbol_count`, `current_gl
 | `lib/supabase-server.ts` / `lib/supabase-browser.ts` | Clientes Supabase Auth (`@supabase/ssr`) para Route Handlers y componentes de cliente. |
 | `lib/tokens.ts` | Lookup/regeneración de tokens desde la tabla `tokens`. |
 | `lib/users.ts` | Lookup/gestión de usuarios y roles desde `user_roles` + Supabase Auth Admin API. |
-| `lib/email.ts` | Envío de emails de invitación vía Resend. |
+| `lib/email.ts` | Envío de emails (invitación + recuperación de contraseña) vía Resend, con `emailShell()` compartido que agrega el disclaimer legal de Pessaro Capital a todo correo saliente. |
+| `lib/pessaro-logo.ts` | Logo de Pessaro Capital embebido en base64 para `/login`. |
 | `lib/auth.ts` | Gate dual (sesión con rol vigente u `OPERATOR_TOKEN`) para `/api/status` y `/api/settings`. |
 | `lib/counts.ts` | Lógica de conteo autoritativo por símbolo/global. |
 | `mt4/PessaroBridgeEA.mq4` | Expert Advisor MQL4 — notificador, sin `OrderSend`. |
@@ -105,7 +108,9 @@ Copiar `.env.example` a `.env.local` y completar:
 
 Generar tokens con `openssl rand -hex 32`.
 
-Migraciones SQL en `supabase/migrations/`, **aplicar en orden**: `001_schema.sql` → `002_function_search_path.sql` → `003_grant_service_role.sql` → `004_tokens.sql` → `005_user_roles.sql`. La `003` no es opcional: sin ella, `service_role` no tiene permisos sobre `signals`/`audit`/`settings` y todas las rutas API fallan con `permission denied` aunque RLS esté bien configurado.
+Migraciones SQL en `supabase/migrations/`, **aplicar en orden**: `001_schema.sql` → `002_function_search_path.sql` → `003_grant_service_role.sql` → `004_tokens.sql` → `005_user_roles.sql` → `006_ea_last_poll.sql`. La `003` no es opcional: sin ella, `service_role` no tiene permisos sobre `signals`/`audit`/`settings` y todas las rutas API fallan con `permission denied` aunque RLS esté bien configurado. La `006` agrega `tokens.last_used_at`, el heartbeat que usa `/status` para el badge EA online/offline (independiente de si hay señales pendientes que reclamar).
+
+En el dashboard de Supabase (Authentication → URL Configuration), el **Site URL** y los **Redirect URLs** deben apuntar al dominio real (`https://brige.pessaro.cl/set-password`), no a `localhost` — si quedan apuntando a localhost, los links de invitación/recuperación enviados por correo llevan a los usuarios a una URL inaccesible. Es config del dashboard de Supabase, no del código.
 
 ### Setup inicial de admin, tokens y usuarios (una sola vez)
 
@@ -130,24 +135,20 @@ Los pasos detallados (whitelisting de WebRequest, cálculo del offset horario NY
 
 ## Estado actual / últimas piezas implementadas
 
-Según `git log`, el bridge está **completo** en su modo despachador manual (meta-prompt v3):
+Según `git log`, el bridge está **completo y en producción** (`brige.pessaro.cl`) en su modo despachador manual (meta-prompt v3):
 
 1. Esquema SQL, API routes, EA notificador MQL4 (piezas 1–3).
 2. Panel `/status` con identidad visual Pessaro Capital (pieza 4).
 3. Migración aplicada a Supabase + correcciones post-deploy detectadas en producción.
 4. Pruebas Vitest y documentación de despliegue (pieza 5).
-5. **Dashboard de admin — login Supabase Auth + gestión de usuarios (pieza 6, en curso, 22-jul-2026):**
-   - `user_roles` (`super_admin`/`admin`), invitación por correo vía Resend (`lib/email.ts`) con link de Supabase a `/set-password`.
-   - `app/api/users/*` (list/invite/role/revoke) + `app/status/users` (UI de gestión, solo `super_admin`).
-   - Envío de correo por Resend **confirmado funcionando** (test manual, 22-jul-2026).
-   - **Sin commitear todavía**: `app/api/users/`, `app/set-password/`, `app/status/users/`, `lib/email.ts`, `lib/users.ts`, `supabase/migrations/005_user_roles.sql`, más cambios en `.env.example`, `lib/auth.ts`, `lib/schema.ts`, `scripts/create-admin-user.ts`, `app/status/page.tsx`.
+5. **Dashboard de admin — login Supabase Auth + gestión de usuarios (pieza 6):** `user_roles` (`super_admin`/`admin`), invitación por correo vía Resend con link de Supabase a `/set-password`, `app/api/users/*` (list/invite/role/revoke) + `app/status/users` (UI, solo `super_admin`). Commiteado (`6efca47`) y desplegado. Probado end-to-end en producción con una cuenta de prueba: invitar → correo real (Resend) → `/set-password` → login, las 4 etapas confirmadas. En la prueba se encontraron y corrigieron 2 bugs: Supabase Auth Site URL/Redirect URLs apuntaban a `localhost` (config del dashboard de Supabase, corregida manualmente) y `/set-password` (`7c05547`) confiaba en la sesión ya activa del navegador en vez de canjear explícitamente el token del link con `setSession()` — podía sobreescribir la contraseña de la cuenta equivocada si el invitador tenía sesión abierta en la misma pestaña. Ya corregido.
+6. Fix de heartbeat del EA (`8375fc5`): el badge "EA online/offline" y "último poll" en `/status` dependían de `signals.claimed_at`, que solo avanza si hay una señal pendiente — con la cola vacía (caso normal) marcaba "EA OFFLINE" pese a que el EA autenticaba bien. Se agregó `tokens.last_used_at` (migración `006_ea_last_poll.sql`) como heartbeat real, actualizado en cada `GET /api/signals` con token válido. Fix relacionado (`a1f5d3e`): el cálculo de "hace Ns" en el navegador podía dar negativo por desfase de reloj del cliente; acotado con `Math.max(0, ...)`.
+7. **Rediseño de `/login` + recuperar contraseña + disclaimer legal (`581237d`):** `/login` con fondo `public/brige-login.jpg` y logo oficial de Pessaro Capital (mismo tratamiento visual que pessaro.cl), estilos propios en `app/login/login.module.css`. Nuevo flujo "¿Olvidaste tu contraseña?" vía `POST /api/auth/forgot-password` (público, nunca crea usuarios ni revela si un correo tiene acceso, solo reenvía el link a cuentas ya en `user_roles`). `lib/email.ts` centraliza un `emailShell()` que agrega el disclaimer legal obligatorio de Pessaro Capital (riesgo, exención de responsabilidad, RUT/domicilio) a todo correo saliente. Verificado en producción con `fcorojas.fx@gmail.com`.
 
-**Pendiente (continuar mañana):**
-- Probar el flujo completo end-to-end: invitar usuario desde `/status/users` → recibir correo → `/set-password` → login con la contraseña nueva.
-- Confirmar que la migración `005_user_roles.sql` esté aplicada en el proyecto Supabase remoto (no solo local).
-- Revisar/commitear el dashboard de usuarios una vez probado.
-- Comparado con `pessaro-crm` (ver conversación 22-jul-2026): se decidió **mantener el modelo simple de 2 roles** (`super_admin`/`admin`) en vez de los 3 niveles + tabla de perfil extendido (`crm_staff_profiles`) que usa el CRM — Bridge no necesita esos campos salvo que se agreguen más funciones de equipo.
-- Pendiente de quien despliega (arrastrado de piezas anteriores): compilar el `.mq4` en MetaEditor (no disponible en este entorno de desarrollo), confirmar el CNAME de `brige.pessaro.cl`, cargar las variables de entorno en Vercel (incluida `RESEND_API_KEY`), y correr la verificación end-to-end contra producción.
+**Modelo de roles:** se comparó con `pessaro-crm` (repo hermano, 3 roles + tabla de perfil extendido `crm_staff_profiles`) y se decidió **mantener el modelo simple de 2 roles** (`super_admin`/`admin`) en Bridge — solo gestiona acceso al panel, no un CRM con múltiples módulos de equipo.
+
+**Pendiente / a vigilar:**
+- Los links de recuperación entregados por email llegaron con el token ya invalidado (`otp_expired`) en 2 intentos vía Gmail, mientras que un link generado directo funcionó a la primera — sugiere que algo en el camino de entrega (Gmail y/o el proxy de Resend) pre-visita el link de un solo uso. No investigado a fondo; si se repite con invitaciones reales, considerar que el email lleve a una página propia con un botón a clickear en vez de un link GET directo al endpoint de Supabase.
 
 ## Documentación
 
