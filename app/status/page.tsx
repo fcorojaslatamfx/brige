@@ -395,7 +395,11 @@ function fmt(n: number | null | undefined): string {
 
 function formatRelative(iso: string): string {
   const diffMs = Date.now() - new Date(iso).getTime();
-  const s = Math.floor(diffMs / 1000);
+  // Math.max(0, ...): el reloj del navegador puede ir unos segundos
+  // atrasado respecto al servidor que puso el timestamp — sin el clamp,
+  // un poll recién registrado se mostraba como "hace -135s" en vez de
+  // "hace 0s".
+  const s = Math.max(0, Math.floor(diffMs / 1000));
   if (s < 60) return `hace ${s}s`;
   const m = Math.floor(s / 60);
   if (m < 60) return `hace ${m}m`;
