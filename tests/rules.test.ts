@@ -1,14 +1,22 @@
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { NextRequest } from "next/server";
 import { ackSchema, settingsUpdateSchema, webhookPayloadSchema } from "../lib/schema";
 import { isFresh, safeTokenEquals, toEaPayload, type SignalRow } from "../lib/counts";
+import { getToken, type TokenKind } from "../lib/tokens";
 import { supabase } from "../lib/supabase";
 import { POST as webhookPOST } from "../app/api/webhook/route";
 import { GET as signalsGET } from "../app/api/signals/route";
 import { POST as ackPOST } from "../app/api/ack/route";
 
-const TV_TOKEN = process.env.TV_WEBHOOK_TOKEN;
-const EA_TOKEN = process.env.EA_TOKEN;
+// Presencia de credenciales en el entorno: chequeo síncrono barato para
+// decidir si intentar la suite de integración. Los valores REALES usados
+// por los tests (TV_TOKEN/EA_TOKEN) se resuelven desde la tabla `tokens`
+// en el beforeAll de abajo — la env var solo sirve para sembrarla si viene
+// vacía (bootstrap local/CI), nunca como fallback en tiempo de request.
+const ENV_TV_TOKEN = process.env.TV_WEBHOOK_TOKEN;
+const ENV_EA_TOKEN = process.env.EA_TOKEN;
+let TV_TOKEN: string | undefined;
+let EA_TOKEN: string | undefined;
 const BASE = "http://localhost";
 
 // Prefijo único por corrida: ningún instrumento real (XAUUSD, EURJPY, ...)
@@ -213,10 +221,24 @@ describe("lib/counts · toEaPayload sobreescribe con conteos autoritativos", () 
 // real usa y limpian sus propias filas en afterAll — pero SÍ escriben en la
 // base mientras corren. Si no hay credenciales en el entorno, se saltan.
 const hasLiveCreds = Boolean(
-  TV_TOKEN && EA_TOKEN && process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY,
+  ENV_TV_TOKEN && ENV_EA_TOKEN && process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY,
 );
 
+/** Lee el token activo desde `tokens`; si la fila viene vacía, la siembra con el valor de la env var (bootstrap). */
+async function ensureTokenSeeded(kind: TokenKind, envValue: string | undefined): Promise<string | undefined> {
+  const existing = await getToken(kind);
+  if (existing) return existing;
+  if (!envValue) return undefined;
+  await supabase.from("tokens").upsert({ kind, value: envValue, updated_by: "test-bootstrap" });
+  return envValue;
+}
+
 describe.skipIf(!hasLiveCreds)("reglas de negocio (integración contra Supabase real)", () => {
+  beforeAll(async () => {
+    TV_TOKEN = await ensureTokenSeeded("tv_webhook", ENV_TV_TOKEN);
+    EA_TOKEN = await ensureTokenSeeded("ea", ENV_EA_TOKEN);
+  });
+
   // El test de "token inválido" deja una fila en `audit` sin signal_id (no
   // hay señal a la que ligarla) que este afterAll no puede distinguir de un
   // evento real de token inválido sin arriesgar un filtro de tiempo poco

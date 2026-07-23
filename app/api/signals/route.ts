@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { safeTokenEquals, toEaPayload, type SignalRow } from "@/lib/counts";
+import { getToken } from "@/lib/tokens";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -9,7 +10,7 @@ const DEFAULT_MAX = 50;
 
 export async function GET(req: NextRequest) {
   const token = req.nextUrl.searchParams.get("token");
-  if (!safeTokenEquals(token, process.env.EA_TOKEN)) {
+  if (!safeTokenEquals(token, (await getToken("ea")) ?? undefined)) {
     await supabase.from("audit").insert({
       signal_id: null,
       event_type: "invalid_token",

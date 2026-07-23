@@ -16,8 +16,11 @@ TradingView ──POST──▶ /api/webhook   (valida token + esquema Zod + fre
                             │
 MT4 PessaroBridgeEA ◀──GET /api/signals   (polling · payload enriquecido)
         └──────────────POST /api/ack      (confirmación de notificación)
-Navegador ◀──────────── /status           (panel de monitoreo, protegido por token)
+Navegador ◀──────────── /status           (panel de monitoreo, login Supabase Auth)
+                    └─── /status/tokens   (ver/regenerar TV_WEBHOOK_TOKEN, EA_TOKEN, OPERATOR_TOKEN)
 ```
+
+Los tres tokens de integración (`tv_webhook`, `ea`, `operator`) viven en la tabla `tokens` de Supabase, no en env vars — se ven y regeneran desde `/status/tokens` sin redeploy. `/api/webhook`, `/api/signals` y `/api/ack` siguen validando un `?token=` estático (TradingView y MT4 no pueden manejar sesión), ahora leído de esa tabla. `/status` y `/api/settings` exigen sesión Supabase Auth (login); `/api/status` y `/api/settings` además aceptan el `OPERATOR_TOKEN` vigente como credencial alterna para scripts externos.
 
 Cada señal trae, sobrescritos por Supabase, `current_symbol_count`, `current_global_count` y `threshold_exceeded` — los umbrales diarios (por símbolo y globales) son informativos y editables en caliente desde `/status` (vía `/api/settings`), sin bloquear ninguna señal técnicamente válida.
 
@@ -36,12 +39,19 @@ Cada señal trae, sobrescritos por Supabase, `current_symbol_count`, `current_gl
 | `app/api/webhook/` | Recibe la alerta de TradingView (token + esquema + frescura + dedup). |
 | `app/api/signals/` | El EA hace polling aquí para reclamar señales pendientes. |
 | `app/api/ack/` | El EA confirma que ya notificó una señal. |
-| `app/api/settings/` | GET/PUT de los umbrales editables (protegido con `OPERATOR_TOKEN`). |
+| `app/api/settings/` | GET/PUT de los umbrales editables (sesión Supabase Auth u `OPERATOR_TOKEN`). |
 | `app/api/status/` | Datos que alimenta el panel `/status`. |
+| `app/api/tokens/` | GET/regenerate de los tokens de integración (solo sesión, sin fallback). |
 | `app/api/cron/cleanup/` | Job diario (Vercel Cron) de limpieza/compactado de auditoría. |
+| `app/login/` | Login del dashboard (correo + contraseña, Supabase Auth). |
 | `app/status/` | Panel de monitoreo con identidad Pessaro Capital. |
-| `lib/schema.ts` | Esquemas Zod del contrato JSON (webhook, ack, settings). |
-| `lib/supabase.ts` | Cliente de Supabase (service role). |
+| `app/status/tokens/` | Ver/copiar/regenerar los tres tokens de integración. |
+| `middleware.ts` | Protege `/status/*` y `/login` con la sesión de Supabase Auth. |
+| `lib/schema.ts` | Esquemas Zod del contrato JSON (webhook, ack, settings, tokens). |
+| `lib/supabase.ts` | Cliente de Supabase (service role) — signals/settings/audit/tokens. |
+| `lib/supabase-server.ts` / `lib/supabase-browser.ts` | Clientes Supabase Auth (`@supabase/ssr`) para Route Handlers y componentes de cliente. |
+| `lib/tokens.ts` | Lookup/regeneración de tokens desde la tabla `tokens`. |
+| `lib/auth.ts` | Gate dual (sesión u `OPERATOR_TOKEN`) para `/api/status` y `/api/settings`. |
 | `lib/counts.ts` | Lógica de conteo autoritativo por símbolo/global. |
 | `mt4/PessaroBridgeEA.mq4` | Expert Advisor MQL4 — notificador, sin `OrderSend`. |
 | `supabase/migrations/` | Esquema SQL, ajuste de `search_path` y grants de `service_role` (en orden). |
@@ -76,14 +86,24 @@ Copiar `.env.example` a `.env.local` y completar:
 | `SUPABASE_URL` | Proyecto Supabase → Project Settings → API |
 | `SUPABASE_SERVICE_ROLE_KEY` | Ídem (secreta, solo servidor) |
 | `SUPABASE_DB_PASSWORD` | Para conexión directa/CLI si hace falta |
-| `TV_WEBHOOK_TOKEN` | Token que valida el webhook de TradingView |
-| `EA_TOKEN` | Token que valida el polling del EA (distinto del anterior) |
-| `OPERATOR_TOKEN` | Protege `/status` y `/api/settings` |
+| `NEXT_PUBLIC_SUPABASE_URL` | Igual a `SUPABASE_URL`, expuesta al navegador para el login |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Anon key pública (RLS deniega todo a `anon`/`authenticated`, solo sirve para el intercambio de sesión de Auth) |
+| `TV_WEBHOOK_TOKEN` / `EA_TOKEN` / `OPERATOR_TOKEN` | Solo para el backfill inicial (`scripts/backfill-tokens.ts`) y bootstrap de tests locales — en runtime la fuente de verdad es la tabla `tokens`, gestionada desde `/status/tokens` |
 | `CRON_SECRET` | Valida el `Authorization: Bearer` que envía el cron de Vercel |
+| `ADMIN_EMAIL` / `ADMIN_INITIAL_PASSWORD` | Solo para el setup inicial (`scripts/create-admin-user.ts`), no se usan en runtime |
 
 Generar tokens con `openssl rand -hex 32`.
 
-Migraciones SQL en `supabase/migrations/`, **aplicar en orden**: `001_schema.sql` → `002_function_search_path.sql` → `003_grant_service_role.sql`. La `003` no es opcional: sin ella, `service_role` no tiene permisos sobre `signals`/`audit`/`settings` y todas las rutas API fallan con `permission denied` aunque RLS esté bien configurado.
+Migraciones SQL en `supabase/migrations/`, **aplicar en orden**: `001_schema.sql` → `002_function_search_path.sql` → `003_grant_service_role.sql` → `004_tokens.sql`. La `003` no es opcional: sin ella, `service_role` no tiene permisos sobre `signals`/`audit`/`settings` y todas las rutas API fallan con `permission denied` aunque RLS esté bien configurado.
+
+### Setup inicial de admin y tokens (una sola vez)
+
+```bash
+ADMIN_EMAIL=... ADMIN_INITIAL_PASSWORD=... npx tsx scripts/create-admin-user.ts
+npx tsx scripts/backfill-tokens.ts   # siembra tokens desde las env vars, sin repegar nada en TradingView/MT4
+```
+
+En el dashboard de Supabase (Authentication → Providers → Email), **desactivar "Allow new user signups"** apenas la anon key quede pública en el frontend — no hay flujo de registro en la app, el único usuario se crea con el script de arriba. Una vez confirmado que `/status/tokens` muestra los tres tokens y que el webhook/EA siguen funcionando, se pueden borrar `TV_WEBHOOK_TOKEN`, `EA_TOKEN` y `OPERATOR_TOKEN` de Vercel.
 
 ## Despliegue
 

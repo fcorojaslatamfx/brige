@@ -2,13 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { ackSchema } from "@/lib/schema";
 import { safeTokenEquals } from "@/lib/counts";
+import { getToken } from "@/lib/tokens";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function POST(req: NextRequest) {
   const token = req.nextUrl.searchParams.get("token");
-  if (!safeTokenEquals(token, process.env.EA_TOKEN)) {
+  if (!safeTokenEquals(token, (await getToken("ea")) ?? undefined)) {
     await supabase.from("audit").insert({
       signal_id: null,
       event_type: "invalid_token",

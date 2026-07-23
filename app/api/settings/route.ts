@@ -1,18 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { settingsUpdateSchema } from "@/lib/schema";
-import { getSettings, safeTokenEquals } from "@/lib/counts";
+import { getSettings } from "@/lib/counts";
+import { isAuthorizedOperator } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-function checkOperatorToken(req: NextRequest): boolean {
-  const token = req.nextUrl.searchParams.get("token") ?? req.headers.get("x-operator-token");
-  return safeTokenEquals(token, process.env.OPERATOR_TOKEN);
-}
-
 export async function GET(req: NextRequest) {
-  if (!checkOperatorToken(req)) {
+  if (!(await isAuthorizedOperator(req))) {
     return NextResponse.json({ ok: false, error: "invalid token" }, { status: 401 });
   }
   const settings = await getSettings();
@@ -20,7 +16,7 @@ export async function GET(req: NextRequest) {
 }
 
 export async function PUT(req: NextRequest) {
-  if (!checkOperatorToken(req)) {
+  if (!(await isAuthorizedOperator(req))) {
     return NextResponse.json({ ok: false, error: "invalid token" }, { status: 401 });
   }
 

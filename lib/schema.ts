@@ -81,3 +81,8 @@ export const settingsUpdateSchema = z
   .partial()
   .refine((v) => Object.keys(v).length > 0, { message: "Debe incluir al menos un campo" });
 export type SettingsUpdate = z.infer<typeof settingsUpdateSchema>;
+
+/** Kinds gestionados desde /status/tokens (ver lib/tokens.ts). */
+export const tokenKindSchema = z.enum(["tv_webhook", "ea", "operator"]);
+export const tokenRegenerateSchema = z.object({ kind: tokenKindSchema });
+export type TokenKindInput = z.infer<typeof tokenKindSchema>;

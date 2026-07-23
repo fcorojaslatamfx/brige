@@ -1,6 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import Link from "next/link";
+import { createSupabaseBrowserClient } from "@/lib/supabase-browser";
 import styles from "./status.module.css";
 
 type Settings = {
@@ -58,38 +61,20 @@ type StatusResponse = {
 
 type SettingsForm = Partial<Pick<Settings, "symbol_threshold" | "global_threshold" | "freshness_seconds" | "queue_ttl_seconds">>;
 
-const TOKEN_KEY = "pessaro_operator_token";
 const REFRESH_MS = 5000;
 
 export default function StatusPage() {
-  const [token, setToken] = useState<string | null>(null);
-  const [tokenInput, setTokenInput] = useState("");
+  const router = useRouter();
   const [data, setData] = useState<StatusResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [savingSettings, setSavingSettings] = useState(false);
   const [form, setForm] = useState<SettingsForm>({});
 
-  useEffect(() => {
-    const url = new URL(window.location.href);
-    const urlToken = url.searchParams.get("token");
-    if (urlToken) {
-      sessionStorage.setItem(TOKEN_KEY, urlToken);
-      url.searchParams.delete("token");
-      window.history.replaceState({}, "", url.toString());
-      setToken(urlToken);
-      return;
-    }
-    const stored = sessionStorage.getItem(TOKEN_KEY);
-    if (stored) setToken(stored);
-  }, []);
-
-  const fetchStatus = useCallback(async (activeToken: string) => {
+  const fetchStatus = useCallback(async () => {
     try {
-      const res = await fetch("/api/status", { headers: { "x-operator-token": activeToken }, cache: "no-store" });
+      const res = await fetch("/api/status", { cache: "no-store" });
       if (res.status === 401) {
-        sessionStorage.removeItem(TOKEN_KEY);
-        setToken(null);
-        setError("Token inválido o expirado.");
+        router.push("/login");
         return;
       }
       const json = await res.json();
@@ -102,14 +87,13 @@ export default function StatusPage() {
     } catch {
       setError("No se pudo contactar al bridge.");
     }
-  }, []);
+  }, [router]);
 
   useEffect(() => {
-    if (!token) return;
-    fetchStatus(token);
-    const id = setInterval(() => fetchStatus(token), REFRESH_MS);
+    fetchStatus();
+    const id = setInterval(fetchStatus, REFRESH_MS);
     return () => clearInterval(id);
-  }, [token, fetchStatus]);
+  }, [fetchStatus]);
 
   useEffect(() => {
     if (data?.settings) {
@@ -122,25 +106,17 @@ export default function StatusPage() {
     }
   }, [data?.settings]);
 
-  function handleTokenSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!tokenInput.trim()) return;
-    sessionStorage.setItem(TOKEN_KEY, tokenInput.trim());
-    setToken(tokenInput.trim());
-  }
-
   async function handleSaveSettings() {
-    if (!token) return;
     setSavingSettings(true);
     try {
       const res = await fetch("/api/settings", {
         method: "PUT",
-        headers: { "Content-Type": "application/json", "x-operator-token": token },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(form),
       });
       const json = await res.json();
       if (!json.ok) setError(json.error ?? "No se pudo guardar la configuración.");
-      else await fetchStatus(token);
+      else await fetchStatus();
     } catch {
       setError("No se pudo guardar la configuración.");
     } finally {
@@ -148,29 +124,10 @@ export default function StatusPage() {
     }
   }
 
-  if (!token) {
-    return (
-      <div className={styles.page}>
-        <div className={styles.gate}>
-          <h1 className={styles.gateTitle}>PESSARO BRIDGE</h1>
-          <p className={styles.gateSubtitle}>Panel protegido — ingresa el token de operador</p>
-          <form onSubmit={handleTokenSubmit} className={styles.gateForm}>
-            <input
-              type="password"
-              value={tokenInput}
-              onChange={(e) => setTokenInput(e.target.value)}
-              placeholder="OPERATOR_TOKEN"
-              className={styles.gateInput}
-              autoFocus
-            />
-            <button type="submit" className={styles.gateButton}>
-              Entrar
-            </button>
-          </form>
-          {error && <p className={styles.errorText}>{error}</p>}
-        </div>
-      </div>
-    );
+  async function handleLogout() {
+    const supabase = createSupabaseBrowserClient();
+    await supabase.auth.signOut();
+    router.push("/login");
   }
 
   return (
@@ -180,7 +137,15 @@ export default function StatusPage() {
           <h1 className={styles.title}>PESSARO BRIDGE</h1>
           <p className={styles.subtitle}>Modo despachador manual · el trader decide</p>
         </div>
-        <EaStatusBadge data={data} />
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <EaStatusBadge data={data} />
+          <Link href="/status/tokens" className={styles.saveButton} style={{ textDecoration: "none" }}>
+            Tokens
+          </Link>
+          <button type="button" onClick={handleLogout} className={styles.gateButton}>
+            Cerrar sesión
+          </button>
+        </div>
       </header>
 
       {error && <div className={styles.banner}>{error}</div>}

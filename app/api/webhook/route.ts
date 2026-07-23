@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { webhookPayloadSchema, isEntrySignal, type WebhookPayload } from "@/lib/schema";
 import { getSettings, isFresh, safeTokenEquals } from "@/lib/counts";
+import { getToken } from "@/lib/tokens";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -64,7 +65,7 @@ async function insertRejected(
 
 export async function POST(req: NextRequest) {
   const token = req.nextUrl.searchParams.get("token");
-  if (!safeTokenEquals(token, process.env.TV_WEBHOOK_TOKEN)) {
+  if (!safeTokenEquals(token, (await getToken("tv_webhook")) ?? undefined)) {
     await supabase.from("audit").insert({
       signal_id: null,
       event_type: "invalid_token",
