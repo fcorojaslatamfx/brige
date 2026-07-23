@@ -1,11 +1,14 @@
 import { z } from "zod";
 
 /**
- * Contrato JSON del indicador "TD Confluence Londres Nueva York v1.2" (Pine v6).
+ * Contrato JSON del indicador "TD Confluence Londres Nueva York" (Pine v6).
  * No modificar los nombres de campo: los emite Pine tal cual.
- * Los campos de conteo/umbral son best-effort (se reinician si se recarga el
- * script) — se guardan como origin_* para auditoría; los definitivos se
- * recalculan en Supabase (ver contar_dia / fn_apply_authoritative_counts).
+ * Compatible con v1.0 (producción) y v1.2: grade, impulse_atr y los campos
+ * de conteo/umbral se agregaron en v1.2 y son opcionales. grade/impulse_atr
+ * caen a un default cuando faltan; los campos de conteo son best-effort (se
+ * reinician si se recarga el script) y se guardan como origin_* solo para
+ * auditoría — los definitivos se recalculan en Supabase (ver contar_dia /
+ * fn_apply_authoritative_counts), por eso no necesitan default.
  */
 
 const baseFields = {
@@ -31,8 +34,8 @@ const partialSchema = z.object({
 const entryFields = {
   ...baseFields,
   type: z.string().optional(),
-  grade: z.enum(["ELITE", "STANDARD"]).optional(),
-  impulse_atr: z.number().optional(),
+  grade: z.enum(["ELITE", "STANDARD"]).default("STANDARD"),
+  impulse_atr: z.number().default(0),
   price: z.number().positive(),
   sl: z.number().positive(),
   partial_1: partialSchema,

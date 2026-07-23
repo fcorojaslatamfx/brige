@@ -72,6 +72,29 @@ describe("lib/schema · contrato Zod (§2 del meta-prompt)", () => {
     expect(result.success).toBe(true);
   });
 
+  it("acepta un payload v1.0 (sin grade/impulse_atr/conteos) y completa los defaults", () => {
+    const v1Payload = {
+      account_id: "TD_CONF_LON_NY",
+      action: "BUY_DUAL",
+      symbol: "XAUUSD",
+      tf: "15",
+      price: 100,
+      sl: 95,
+      partial_1: { lots: 0.01, tp: 110 },
+      partial_2: { lots: 0.01, tp: 120 },
+      risk_usd: 50,
+      timestamp: Date.now(),
+    };
+    const result = webhookPayloadSchema.safeParse(v1Payload);
+    expect(result.success).toBe(true);
+    if (result.success && result.data.action === "BUY_DUAL") {
+      expect(result.data.grade).toBe("STANDARD");
+      expect(result.data.impulse_atr).toBe(0);
+      expect(result.data.current_symbol_count).toBeUndefined();
+      expect(result.data.threshold_exceeded).toBeUndefined();
+    }
+  });
+
   it("rechaza una señal de entrada sin sl", () => {
     const { sl: _sl, ...rest } = entryPayload("XAUUSD");
     expect(webhookPayloadSchema.safeParse(rest).success).toBe(false);
