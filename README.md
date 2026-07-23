@@ -153,7 +153,7 @@ Según `git log`, el bridge está **completo y en producción** (`brige.pessaro.
 ## Documentación
 
 - `docs/metaprompt_pessaro_bridge_v3_despachador.md` — especificación funcional completa del bridge (arquitectura, reglas, despliegue paso a paso, troubleshooting).
-- `docs/MEMORIA_PROYECTO.md` — historial de decisiones de todo el sistema Pessaro (indicador TradingView + bridge), incluyendo el contrato JSON vigente y el roadmap general.
+- `MEMORIA_PROYECTO.md` (raíz del repo) — historial de decisiones de todo el sistema Pessaro (indicador TradingView + bridge), incluyendo el contrato JSON vigente y el roadmap general.
 
 ## Licencia
 

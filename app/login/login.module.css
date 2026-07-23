@@ -34,7 +34,6 @@
   background-size: cover;
   background-position: center;
   filter: saturate(0.85) brightness(0.5);
-  opacity: 0.25;
 }
 
 .backdropOverlay {
