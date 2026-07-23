@@ -142,6 +142,9 @@ export default function StatusPage() {
           <Link href="/status/tokens" className={styles.saveButton} style={{ textDecoration: "none" }}>
             Tokens
           </Link>
+          <Link href="/status/users" className={styles.saveButton} style={{ textDecoration: "none" }}>
+            Usuarios
+          </Link>
           <button type="button" onClick={handleLogout} className={styles.gateButton}>
             Cerrar sesión
           </button>

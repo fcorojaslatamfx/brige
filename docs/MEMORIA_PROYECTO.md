@@ -1,6 +1,6 @@
 # MEMORIA DEL PROYECTO · TD CONFLUENCE LONDRES → NUEVA YORK
 ### Pessaro Capital · Infraestructura de Trading Algorítmico
-**Última actualización:** 10 de julio de 2026 · **Versión vigente del indicador:** v1.1
+**Última actualización:** 22 de julio de 2026 · **Versión vigente del indicador:** v1.1
 
 > Este documento es la memoria viva del proyecto. Sirve como contexto completo para
 > cualquier sesión futura (Claude, Claude Code u otro desarrollador): qué se construyó,
@@ -38,16 +38,23 @@ Sistema de trading algorítmico de Pessaro Capital compuesto por:
 
 ---
 
-## 3. ESTADO ACTUAL (10-jul-2026)
+## 3. ESTADO ACTUAL (22-jul-2026)
 
 - **Indicador v1.1** entregado; la versión LON→NY previa está **validada en producción
   demo** (capturas del 7–9 de julio confirman señales correctas en XAUUSD, XAGUSD, WTI,
   US30, SP500, US2000, UK100, GBPCAD; log "SELL DISPARADO #1 hoy" y watchlist en vivo).
-- **Bridge**: especificado por completo en el meta-prompt v2 (Vercel + Supabase).
-  Pendiente de construcción en Claude Code. Subdominio decidido: `brige.pessaro.cl`
-  (falta CNAME → Vercel).
-- **JSON v1.1** añade `grade` e `impulse_atr` → el esquema Zod del bridge debe
-  incluirlos (retrocompatible si el parser ignora campos desconocidos).
+- **Bridge**: construido en Claude Code y desplegado en Vercel (`brige.pessaro.cl`).
+  Modo despachador manual completo: webhook, cola Supabase, EA MQL4, panel `/status`,
+  tokens gestionables sin redeploy. Detalle vigente en `README.md` del repo del bridge.
+- **Dashboard de admin del bridge (en curso)**: login Supabase Auth + gestión de
+  usuarios (`user_roles`: `super_admin`/`admin`), invitación por correo vía Resend →
+  `/set-password`. Envío por Resend confirmado funcionando (22-jul-2026); falta probar
+  el flujo end-to-end completo y commitear los archivos pendientes (ver README del
+  bridge, sección "Estado actual"). Se comparó con el dashboard de `pessaro-crm` y se
+  decidió mantener el modelo simple de 2 roles en vez de los 3 niveles + perfil de
+  staff extendido que usa el CRM.
+- **JSON v1.1** añade `grade` e `impulse_atr` → el esquema Zod del bridge ya los
+  incluye.
 
 ---
 
@@ -205,8 +212,10 @@ acento dorado `#c9a84c` (claro `#f0d080`, profundo `#a8862c`), verde `#00d084`, 
 
 ## 9. ROADMAP / PENDIENTES
 
-- [ ] Construir Pessaro Bridge en Claude Code con el meta-prompt v2 (incluir campos v1.1 en Zod)
-- [ ] CNAME `brige.pessaro.cl` → Vercel + env vars (SUPABASE_URL, SERVICE_ROLE_KEY, TV_WEBHOOK_TOKEN, EA_TOKEN)
+- [x] Construir Pessaro Bridge en Claude Code con el meta-prompt v2 (incluir campos v1.1 en Zod)
+- [x] CNAME `brige.pessaro.cl` → Vercel + env vars (SUPABASE_URL, SERVICE_ROLE_KEY, TV_WEBHOOK_TOKEN, EA_TOKEN)
+- [ ] Dashboard de admin del bridge: probar flujo end-to-end (invitar → email Resend → `/set-password` → login) y commitear
+- [ ] Confirmar migración `005_user_roles.sql` aplicada en el Supabase remoto de producción
 - [ ] EA `PessaroBridgeEA.mq4`: mapeo de símbolos del bróker real + política ELITE
 - [ ] Validación en demo ≥ 1 semana (frecuencia de señales, tasa de llenado del 0.618/0.786, distribución STANDARD/ELITE)
 - [ ] Definir política ELITE del EA (ej. +25% lote o "solo ELITE")

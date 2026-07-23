@@ -28,12 +28,21 @@ async function main() {
     email_confirm: true,
   });
 
-  if (error) {
-    console.error("No se pudo crear el usuario:", error.message);
+  if (error || !data.user) {
+    console.error("No se pudo crear el usuario:", error?.message ?? "sin datos");
     process.exit(1);
   }
 
-  console.log(`Usuario admin creado: ${data.user?.email} (id ${data.user?.id})`);
+  const { error: roleError } = await supabase
+    .from("user_roles")
+    .upsert({ user_id: data.user.id, role: "super_admin" });
+
+  if (roleError) {
+    console.error("Usuario creado pero no se pudo asignar el rol:", roleError.message);
+    process.exit(1);
+  }
+
+  console.log(`Usuario admin creado: ${data.user.email} (id ${data.user.id}), rol super_admin asignado.`);
 }
 
 main();
