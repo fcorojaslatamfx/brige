@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { getSettings } from "@/lib/counts";
 import { isAuthorizedOperator } from "@/lib/auth";
+import { computeEaPollStatus } from "@/lib/tokens";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -11,7 +12,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "invalid token" }, { status: 401 });
   }
 
-  const [settings, pendingCountRes, auditRes, signalsRes, dayCountsRes, lastClaimRes] = await Promise.all([
+  const [settings, pendingCountRes, auditRes, signalsRes, dayCountsRes, eaTokenRes] = await Promise.all([
     getSettings(),
     supabase.from("signals").select("id", { count: "exact", head: true }).eq("status", "pending"),
     supabase.from("audit").select("*").order("created_at", { ascending: false }).limit(50),
@@ -23,7 +24,7 @@ export async function GET(req: NextRequest) {
       .order("created_at", { ascending: false })
       .limit(50),
     supabase.rpc("today_counts"),
-    supabase.from("signals").select("claimed_at").not("claimed_at", "is", null).order("claimed_at", { ascending: false }).limit(1).maybeSingle(),
+    supabase.from("tokens").select("last_used_at").eq("kind", "ea").maybeSingle(),
   ]);
 
   const dayCounts = dayCountsRes.data ?? [];
@@ -33,8 +34,7 @@ export async function GET(req: NextRequest) {
   ).length;
   const globalOverThreshold = globalCount > settings.global_threshold;
 
-  const lastPollAt = lastClaimRes.data?.claimed_at ?? null;
-  const lastPollLatencySeconds = lastPollAt ? (Date.now() - new Date(lastPollAt).getTime()) / 1000 : null;
+  const { lastPollAt, lastPollLatencySeconds, eaOnline } = computeEaPollStatus(eaTokenRes.data?.last_used_at ?? null);
 
   return NextResponse.json({
     ok: true,
@@ -48,6 +48,6 @@ export async function GET(req: NextRequest) {
     symbols_over_threshold: overThreshold,
     last_poll_at: lastPollAt,
     last_poll_latency_seconds: lastPollLatencySeconds,
-    ea_online: lastPollLatencySeconds !== null && lastPollLatencySeconds < 10,
+    ea_online: eaOnline,
   });
 }

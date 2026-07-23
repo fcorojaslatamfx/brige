@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { NextRequest } from "next/server";
 import { ackSchema, settingsUpdateSchema, webhookPayloadSchema } from "../lib/schema";
 import { isFresh, safeTokenEquals, toEaPayload, type SignalRow } from "../lib/counts";
-import { getToken, type TokenKind } from "../lib/tokens";
+import { computeEaPollStatus, getToken, type TokenKind } from "../lib/tokens";
 import { supabase } from "../lib/supabase";
 import { POST as webhookPOST } from "../app/api/webhook/route";
 import { GET as signalsGET } from "../app/api/signals/route";
@@ -317,6 +317,23 @@ describe.skipIf(!hasLiveCreds)("reglas de negocio (integración contra Supabase 
     const secondBody = await second.json();
     const overlap = secondBody.signals.filter((s: { id: string }) => claimedIds.has(s.id));
     expect(overlap.length).toBe(0);
+  });
+
+  it("GET /api/signals válido registra el heartbeat aunque no haya señales pendientes, y computeEaPollStatus lo ve online", async () => {
+    // Cola vacía a propósito: el bug era que "último poll"/online-offline
+    // dependía de signals.claimed_at, que solo avanza cuando HAY una señal
+    // que reclamar. Sin nada pendiente, un poll legítimo no debía dejar
+    // rastro — este test cubre justo ese caso, leyendo el mismo heartbeat
+    // (tokens.last_used_at) que expone /api/status.
+    const before = await signalsGET(httpRequest(`/api/signals?token=${EA_TOKEN}&max=100`));
+    expect((await before.json()).ok).toBe(true);
+
+    const { data } = await supabase.from("tokens").select("last_used_at").eq("kind", "ea").maybeSingle();
+    const status = computeEaPollStatus(data?.last_used_at ?? null);
+
+    expect(status.lastPollAt).toBeTruthy();
+    expect(status.eaOnline).toBe(true);
+    expect(status.lastPollLatencySeconds).toBeLessThan(10);
   });
 
   it("POST /api/ack marca notified y es idempotente en un segundo ack", async () => {

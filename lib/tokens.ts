@@ -8,6 +8,7 @@ export type TokenRow = {
   value: string;
   updated_at: string;
   updated_by: string | null;
+  last_used_at: string | null;
 };
 
 const CACHE_TTL_MS = 5_000;
@@ -34,9 +35,42 @@ export async function getToken(kind: TokenKind): Promise<string | null> {
 }
 
 export async function listTokens(): Promise<TokenRow[]> {
-  const { data, error } = await supabase.from("tokens").select("kind, value, updated_at, updated_by").order("kind");
+  const { data, error } = await supabase
+    .from("tokens")
+    .select("kind, value, updated_at, updated_by, last_used_at")
+    .order("kind");
   if (error) throw new Error(`No se pudieron leer los tokens: ${error.message}`);
   return (data ?? []) as TokenRow[];
+}
+
+/**
+ * Heartbeat de autenticación: se llama en cada request exitoso contra un
+ * endpoint que consume este token (hoy solo /api/signals con kind "ea"),
+ * haya o no trabajo real que hacer. Independiente de `updated_at`
+ * (rotación) — es lo que /api/status usa para "último poll"/online-offline,
+ * en vez de inferirlo de efectos secundarios como signals.claimed_at.
+ */
+export async function touchTokenUsage(kind: TokenKind): Promise<void> {
+  const { error } = await supabase.from("tokens").update({ last_used_at: new Date().toISOString() }).eq("kind", kind);
+  if (error) throw new Error(`No se pudo registrar el uso del token: ${error.message}`);
+}
+
+const EA_ONLINE_THRESHOLD_SECONDS = 10;
+
+export type EaPollStatus = {
+  lastPollAt: string | null;
+  lastPollLatencySeconds: number | null;
+  eaOnline: boolean;
+};
+
+/** Deriva el badge online/offline de /status a partir del heartbeat de tokens.last_used_at (kind "ea"). */
+export function computeEaPollStatus(lastUsedAt: string | null, nowMs = Date.now()): EaPollStatus {
+  const lastPollLatencySeconds = lastUsedAt ? (nowMs - new Date(lastUsedAt).getTime()) / 1000 : null;
+  return {
+    lastPollAt: lastUsedAt,
+    lastPollLatencySeconds,
+    eaOnline: lastPollLatencySeconds !== null && lastPollLatencySeconds < EA_ONLINE_THRESHOLD_SECONDS,
+  };
 }
 
 export async function regenerateToken(kind: TokenKind, updatedBy: string): Promise<TokenRow> {
@@ -44,7 +78,7 @@ export async function regenerateToken(kind: TokenKind, updatedBy: string): Promi
   const { data, error } = await supabase
     .from("tokens")
     .upsert({ kind, value, updated_at: new Date().toISOString(), updated_by: updatedBy })
-    .select("kind, value, updated_at, updated_by")
+    .select("kind, value, updated_at, updated_by, last_used_at")
     .single();
 
   if (error || !data) {

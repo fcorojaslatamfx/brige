@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { safeTokenEquals, toEaPayload, type SignalRow } from "@/lib/counts";
-import { getToken } from "@/lib/tokens";
+import { getToken, touchTokenUsage } from "@/lib/tokens";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -18,6 +18,12 @@ export async function GET(req: NextRequest) {
     });
     return NextResponse.json({ ok: false, error: "invalid token" }, { status: 401 });
   }
+
+  // Heartbeat: registrar el poll aunque no haya señales pendientes que
+  // reclamar — antes solo se sabía que el EA seguía vivo cuando
+  // claim_signals tocaba una fila, así que con la cola vacía el panel
+  // marcaba "offline" pese a que el EA autenticaba bien cada ciclo.
+  await touchTokenUsage("ea");
 
   const maxParam = req.nextUrl.searchParams.get("max");
   const max = maxParam ? Math.max(1, Math.min(200, parseInt(maxParam, 10) || DEFAULT_MAX)) : DEFAULT_MAX;
