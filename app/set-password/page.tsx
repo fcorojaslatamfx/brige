@@ -14,19 +14,31 @@ export default function SetPasswordPage() {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
+    // El link de invitación/recuperación entrega access_token+refresh_token
+    // en el hash de la URL. Hay que canjearlos explícitamente con
+    // setSession() en vez de confiar en getSession()/onAuthStateChange: si
+    // el navegador ya tenía una sesión activa (por ejemplo, un admin que
+    // sigue logueado y abre el link de OTRO usuario en la misma pestaña),
+    // getSession() devuelve esa sesión vieja en vez de la del link, y
+    // updateUser() termina cambiando la contraseña de la cuenta equivocada
+    // sin ningún error visible.
     const supabase = createSupabaseBrowserClient();
+    const hashParams = new URLSearchParams(window.location.hash.slice(1));
+    const accessToken = hashParams.get("access_token");
+    const refreshToken = hashParams.get("refresh_token");
 
-    supabase.auth.getSession().then(({ data }) => {
-      if (data.session) setReady(true);
+    if (!accessToken || !refreshToken) {
+      setError("Link inválido o expirado. Pedí que te reenvíen la invitación.");
+      return;
+    }
+
+    supabase.auth.setSession({ access_token: accessToken, refresh_token: refreshToken }).then(({ error: sessionError }) => {
+      if (sessionError) {
+        setError("Link inválido o expirado. Pedí que te reenvíen la invitación.");
+        return;
+      }
+      setReady(true);
     });
-
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((event) => {
-      if (event === "PASSWORD_RECOVERY" || event === "SIGNED_IN") setReady(true);
-    });
-
-    return () => subscription.unsubscribe();
   }, []);
 
   async function handleSubmit(e: React.FormEvent) {
@@ -61,7 +73,7 @@ export default function SetPasswordPage() {
         <h1 className={styles.gateTitle}>PESSARO BRIDGE</h1>
         <p className={styles.gateSubtitle}>Define tu contraseña de acceso</p>
         {!ready ? (
-          <p className={styles.hint}>Verificando el enlace de invitación…</p>
+          !error && <p className={styles.hint}>Verificando el enlace de invitación…</p>
         ) : (
           <form onSubmit={handleSubmit} className={styles.gateForm} style={{ flexDirection: "column" }}>
             <input
