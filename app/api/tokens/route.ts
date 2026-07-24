@@ -10,6 +10,9 @@ export async function GET() {
   if (!user) {
     return NextResponse.json({ ok: false, error: "invalid session" }, { status: 401 });
   }
+  if (user.role !== "super_admin") {
+    return NextResponse.json({ ok: false, error: "solo super_admin" }, { status: 403 });
+  }
 
   const tokens = await listTokens();
   return NextResponse.json({ ok: true, tokens });

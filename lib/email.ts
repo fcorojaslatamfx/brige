@@ -78,6 +78,32 @@ export async function sendPasswordResetEmail(opts: { to: string; actionLink: str
   });
 }
 
+export async function sendClientTokenEmail(opts: {
+  to: string;
+  clientName: string | null;
+  token: string;
+  expiresAt: string | null;
+}): Promise<string> {
+  const saludo = opts.clientName ? `Hola ${opts.clientName},` : "Hola,";
+  const vigencia = opts.expiresAt
+    ? `Tu acceso está activo hasta el <strong>${new Date(opts.expiresAt).toLocaleDateString("es-CL", { day: "2-digit", month: "long", year: "numeric" })}</strong>.`
+    : "Tu acceso no tiene fecha de caducidad.";
+
+  const body = `<p style="font-size:14px;color:#2d3748;line-height:1.8;margin:0 0 16px">${saludo}</p>
+    <p style="font-size:14px;color:#2d3748;line-height:1.8;margin:0 0 16px">Pessaro Capital habilitó tu acceso a las señales del sistema. Configura este token en el campo <strong>InpEaToken</strong> del Expert Advisor de MetaTrader 4:</p>
+    <div style="background:#0c0f1a;border:1px solid #c9a84c;border-radius:8px;padding:16px;margin:0 0 16px;text-align:center">
+      <code style="font-size:13px;color:#e8c374;word-break:break-all;font-family:'Courier New',monospace">${opts.token}</code>
+    </div>
+    <p style="font-size:13px;color:#6b7280;line-height:1.7;margin:0 0 8px">${vigencia}</p>
+    <p style="font-size:12px;color:#6b7280;line-height:1.6;margin:16px 0 0">Este token es personal e intransferible. No lo compartas: identifica tu acceso de forma única.</p>`;
+
+  return sendEmail({
+    to: opts.to,
+    subject: "Tu acceso a las señales de Pessaro Bridge",
+    html: emailShell(body),
+  });
+}
+
 async function sendEmail(opts: { to: string; subject: string; html: string }): Promise<string> {
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) throw new Error("Falta RESEND_API_KEY");

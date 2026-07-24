@@ -97,6 +97,12 @@ export default function StatusPage() {
         router.push("/login");
         return;
       }
+      // Un admin (rol normal) no ve el panel operativo completo: su dashboard
+      // es /status/clients (solo sus clientes, sin config del bridge).
+      if (res.status === 403) {
+        router.replace("/status/clients");
+        return;
+      }
       const json = await res.json();
       if (!json.ok) {
         setError(json.error ?? "Error desconocido");

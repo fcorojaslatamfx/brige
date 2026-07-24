@@ -140,9 +140,14 @@ export default function UsersPage() {
           <h1 className={styles.title}>PESSARO BRIDGE</h1>
           <p className={styles.subtitle}>Usuarios del panel</p>
         </div>
-        <Link href="/status" className={styles.gateButton} style={{ textDecoration: "none" }}>
-          Volver al panel
-        </Link>
+        <div style={{ display: "flex", gap: 8 }}>
+          <Link href="/status/clients" className={styles.saveButton} style={{ textDecoration: "none" }}>
+            Clientes
+          </Link>
+          <Link href="/status" className={styles.gateButton} style={{ textDecoration: "none" }}>
+            Volver al panel
+          </Link>
+        </div>
       </header>
 
       {error && <div className={styles.banner}>{error}</div>}

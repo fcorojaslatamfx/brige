@@ -318,5 +318,76 @@ terminal apagado, no el bridge.
   del bridge, sólo cuando ningún payload v1.x siga llegando.
 
 ---
+
+## 13. TOKENS DE CLIENTE (24-jul-2026)
+
+Nueva sección **Clientes** dentro de Usuarios (`/status/clients`, enlazada desde
+`/status/users`). Permite dar acceso a las señales a los leads/contactos de los
+admin mediante tokens por-cliente con caducidad.
+
+- **Modelo de negocio**: el super_admin genera un token por cliente (identificado
+  por **correo + móvil**), con caducidad **7 / 14 / 30 días o indefinido**,
+  opcionalmente asociado al admin dueño del lead. El cliente configura el token
+  en `InpEaToken` de su propio EA de MT4.
+- **Solo super_admin** genera, ve y revoca los tokens (gate por rol en las rutas
+  `/api/clients*`). Se comparten desde el panel: **copiar** o **enviar por correo**
+  (`/api/clients/share` vía Resend, `lib/email.ts::sendClientTokenEmail`). El móvil
+  se muestra como enlace `wa.me`.
+- **⚠ Cambio de modelo de entrega — DIFUSIÓN.** El EA del operador (token de
+  sistema `ea`) mantiene el flujo de **consumo único** (`claim_signals`, la señal
+  pasa a `claimed`). Los clientes usan **difusión**: cada cliente recibe CADA
+  señal de forma independiente, rastreada en `client_deliveries` (fila por
+  señal×cliente, PK compuesta = idempotente). `claim_signals_for_client` devuelve
+  las señales entregables (mismas 3 condiciones de aislamiento §8 + frescura por
+  `queue_ttl_seconds`) aún no entregadas a ese cliente y crea su fila de entrega.
+  Que el operador ya haya notificado una señal no impide que los clientes la
+  reciban mientras siga fresca.
+- **`/api/signals`** ramifica por token: `ea` → operador; token de cliente →
+  difusión (`caducado`/`revocado` → 403, inexistente → 401); `operator` +
+  `include_test` → cola de prueba. **`/api/ack`** ramifica igual: el cliente
+  ackea su fila en `client_deliveries`, no la señal global.
+- **Migración 014** (`client_tokens`, `client_deliveries`, `claim_signals_for_client`)
+  aplicada a producción. El fan-out se validó de forma **transaccional con
+  rollback** (a1=1/a2=0/b1=1: A recibe, A no dos veces, B independiente) sin tocar
+  tráfico real. Suite: **38/38 verde**. Sin nuevos avisos de seguridad.
+- **Aislamiento**: como `claim_signals_for_client` filtra `is_test=false +
+  origin='tradingview' + env='production'`, el tráfico de prueba tampoco llega a
+  los clientes — la misma barrera del §8 los cubre.
+
+Pendiente: enforcement fino opcional (rate-limit por token, notificación de
+caducidad próxima).
+
+## 14. DASHBOARDS DIFERENCIADOS POR ROL (24-jul-2026)
+
+Tres experiencias según quién entra:
+
+- **Super Admin** — panel completo (`/status`): settings, embudo, latencia,
+  señales, auditoría, tokens de sistema, usuarios y TODOS los clientes.
+- **Admin** — dashboard acotado. Al entrar a `/status` se le **redirige a
+  `/status/clients`** y ve **solo sus clientes** (`assigned_admin = él`) y los
+  tokens que el super_admin le compartió. Puede **copiar y compartir por correo**
+  esos tokens; **no** genera, **no** revoca, **no** toca configuración del bridge.
+- **Cliente** — portal propio (`/portal`), **sin login Supabase**: se autentica
+  con su token (el mismo del EA, guardado en localStorage). Ve su token, sus
+  señales, símbolos y un reporte (por símbolo / calidad / estado). Cero
+  configuración. `/portal` queda fuera del matcher del middleware a propósito.
+
+**Endurecimiento de permisos (corrige un exceso previo).** Antes, un admin con
+sesión podía alterar el bridge. Ahora las rutas que CONFIGURAN el puente exigen
+super_admin (o el operator token) vía `isSuperAdminOrOperator`:
+`/api/settings` (GET+PUT), `/api/status` (GET), `/api/tokens` y
+`/api/tokens/regenerate`. `/api/users/*` y `/api/clients` (POST/revoke) ya eran
+super_admin.
+
+- `/api/clients` GET es consciente del rol: super_admin ve todos + lista de
+  admins para asignar; admin ve solo los suyos. `/api/clients/share` deja a un
+  admin compartir **solo** sus propios clientes.
+- `/api/portal` (nuevo, solo lectura, token de cliente): devuelve token, señales
+  entregadas (`listClientDeliveries` = join `client_deliveries`→`signals`) y
+  `buildClientReport`. No expone nada que altere el bridge.
+- Sin migraciones nuevas (reusa el esquema de la §13). Suite **41/41 verde**
+  (portal + report + barreras de vigencia). Build limpio.
+
+---
 *Documento mantenido por Pessaro Capital. Al iniciar una nueva sesión de trabajo sobre
 este proyecto, compartir este archivo como contexto inicial.*

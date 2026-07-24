@@ -20,14 +20,27 @@ async function resolveSessionUser(): Promise<AuthenticatedUser | null> {
 }
 
 /**
- * Gate dual para /api/status y /api/settings: sesión Supabase (con rol
- * vigente en user_roles) o el OPERATOR_TOKEN vigente (acceso programático
- * externo), igual que documenta el README. Regenerar tokens o gestionar
- * usuarios, en cambio, exige sesión — ver app/api/tokens/regenerate y
- * app/api/users/*.
+ * Gate dual para acceso programático: sesión Supabase (cualquier rol vigente)
+ * o el OPERATOR_TOKEN. Se mantiene para compatibilidad, pero las rutas que
+ * ALTERAN el bridge deben usar isSuperAdminOrOperator (ver abajo): un admin
+ * tiene sesión válida pero NO puede tocar la configuración del puente.
  */
 export async function isAuthorizedOperator(req: NextRequest): Promise<boolean> {
   if (await resolveSessionUser()) return true;
+
+  const token = req.nextUrl.searchParams.get("token") ?? req.headers.get("x-operator-token");
+  return safeTokenEquals(token, (await getToken("operator")) ?? undefined);
+}
+
+/**
+ * Gate para todo lo que CONFIGURA/ALTERA el bridge (settings, panel operativo
+ * completo, tokens de sistema): solo super_admin por sesión, o el
+ * OPERATOR_TOKEN para automatización externa. Un admin (rol normal) queda
+ * fuera: su dashboard se limita a sus clientes (ver /status/clients).
+ */
+export async function isSuperAdminOrOperator(req: NextRequest): Promise<boolean> {
+  const user = await resolveSessionUser();
+  if (user) return user.role === "super_admin";
 
   const token = req.nextUrl.searchParams.get("token") ?? req.headers.get("x-operator-token");
   return safeTokenEquals(token, (await getToken("operator")) ?? undefined);

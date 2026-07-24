@@ -150,3 +150,22 @@ export const revokeUserSchema = z.object({
 export const forgotPasswordSchema = z.object({
   email: z.string().email(),
 });
+
+/** Caducidad de un token de cliente (ver lib/clients.ts). */
+export const clientExpirySchema = z.enum(["7d", "14d", "30d", "never"]);
+
+/** Body de POST /api/clients: crear token de cliente (solo super_admin). */
+export const createClientSchema = z.object({
+  client_name: z.string().max(120).optional(),
+  client_email: z.string().email(),
+  client_phone: z.string().min(3).max(30),
+  assigned_admin: z.string().uuid().optional(),
+  expiry: clientExpirySchema,
+});
+export type CreateClientInput = z.infer<typeof createClientSchema>;
+
+/** Body de POST /api/clients/revoke. */
+export const revokeClientSchema = z.object({ id: z.string().uuid() });
+
+/** Body de POST /api/clients/share: reenviar el token de cliente por correo. */
+export const shareClientSchema = z.object({ id: z.string().uuid() });

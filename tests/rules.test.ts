@@ -1,12 +1,14 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { NextRequest } from "next/server";
-import { ackSchema, settingsUpdateSchema, webhookPayloadSchema } from "../lib/schema";
+import { ackSchema, settingsUpdateSchema, webhookPayloadSchema, createClientSchema } from "../lib/schema";
 import { isFresh, safeTokenEquals, toEaPayload, type SignalRow } from "../lib/counts";
 import { computeEaPollStatus, getToken, type TokenKind } from "../lib/tokens";
+import { computeExpiresAt, clientStatus, buildClientReport, type ClientDeliveredSignal } from "../lib/clients";
 import { supabase } from "../lib/supabase";
 import { POST as webhookPOST } from "../app/api/webhook/route";
 import { GET as signalsGET } from "../app/api/signals/route";
 import { POST as ackPOST } from "../app/api/ack/route";
+import { GET as portalGET } from "../app/api/portal/route";
 
 // Presencia de credenciales en el entorno: chequeo síncrono barato para
 // decidir si intentar la suite de integración. Los valores REALES usados
@@ -33,6 +35,7 @@ const SYM_THRESHOLD = `${TEST_PREFIX}_THRESH`;
 const SYM_CLAIM = `${TEST_PREFIX}_CLAIM`;
 const SYM_ACK = `${TEST_PREFIX}_ACK`;
 const SYM_LEAK = `${TEST_PREFIX}_LEAK`;
+const SYM_BROADCAST = `${TEST_PREFIX}_BCAST`;
 
 function httpRequest(path: string, init?: ConstructorParameters<typeof NextRequest>[1]) {
   return new NextRequest(new URL(path, BASE), init);
@@ -171,6 +174,66 @@ describe("lib/schema · ack y settings", () => {
   it("settingsUpdateSchema exige al menos un campo", () => {
     expect(settingsUpdateSchema.safeParse({}).success).toBe(false);
     expect(settingsUpdateSchema.safeParse({ symbol_threshold: 5 }).success).toBe(true);
+  });
+});
+
+describe("lib/schema · tokens de cliente", () => {
+  const base = { client_email: "lead@ejemplo.com", client_phone: "+56912345678", expiry: "30d" as const };
+
+  it("acepta una creación válida con caducidad y campos opcionales", () => {
+    expect(createClientSchema.safeParse({ ...base, client_name: "Lead X" }).success).toBe(true);
+    expect(createClientSchema.safeParse(base).success).toBe(true);
+  });
+
+  it("rechaza correo inválido, teléfono vacío y caducidad desconocida", () => {
+    expect(createClientSchema.safeParse({ ...base, client_email: "no-es-correo" }).success).toBe(false);
+    expect(createClientSchema.safeParse({ ...base, client_phone: "" }).success).toBe(false);
+    expect(createClientSchema.safeParse({ ...base, expiry: "90d" }).success).toBe(false);
+  });
+});
+
+describe("lib/clients · caducidad y estado", () => {
+  it("computeExpiresAt: 7/14/30 días desde ahora, o null para indefinido", () => {
+    const now = new Date("2026-01-01T00:00:00.000Z");
+    expect(computeExpiresAt("never", now)).toBeNull();
+    expect(computeExpiresAt("7d", now)).toBe("2026-01-08T00:00:00.000Z");
+    expect(computeExpiresAt("14d", now)).toBe("2026-01-15T00:00:00.000Z");
+    expect(computeExpiresAt("30d", now)).toBe("2026-01-31T00:00:00.000Z");
+  });
+
+  it("clientStatus: revoked > expired > active", () => {
+    const now = Date.parse("2026-01-10T00:00:00Z");
+    expect(clientStatus({ revoked_at: "2026-01-05T00:00:00Z", expires_at: null }, now)).toBe("revoked");
+    expect(clientStatus({ revoked_at: null, expires_at: "2026-01-09T00:00:00Z" }, now)).toBe("expired");
+    expect(clientStatus({ revoked_at: null, expires_at: "2026-01-20T00:00:00Z" }, now)).toBe("active");
+    expect(clientStatus({ revoked_at: null, expires_at: null }, now)).toBe("active");
+  });
+
+  it("buildClientReport: agrega por símbolo, calidad y estado", () => {
+    const mk = (symbol: string, grade: string, status: ClientDeliveredSignal["status"]): ClientDeliveredSignal => ({
+      status,
+      claimed_at: "2026-01-10T00:00:00Z",
+      notified_at: null,
+      symbol,
+      action: "BUY_DUAL",
+      grade,
+      type: "LIMIT",
+      price: 1,
+      sl: 1,
+      tp1: 1,
+      tp2: 1,
+      ts_signal: 1,
+      created_at: "2026-01-10T00:00:00Z",
+    });
+    const report = buildClientReport([
+      mk("XAUUSD", "ELITE", "notified"),
+      mk("XAUUSD", "STANDARD", "claimed"),
+      mk("EURUSD", "ELITE", "notified"),
+    ]);
+    expect(report.total).toBe(3);
+    expect(report.bySymbol.find((s) => s.symbol === "XAUUSD")?.count).toBe(2);
+    expect(report.byGrade.find((g) => g.grade === "ELITE")?.count).toBe(2);
+    expect(report.byStatus.find((s) => s.status === "notified")?.count).toBe(2);
   });
 });
 
@@ -336,6 +399,98 @@ describe.skipIf(!hasLiveCreds)("reglas de negocio (integración contra Supabase 
       await supabase.from("audit").delete().in("signal_id", ids);
       await supabase.from("signals").delete().in("id", ids);
     }
+    // Clientes de prueba: la cascada borra sus client_deliveries.
+    await supabase.from("client_tokens").delete().like("client_email", `%@${TEST_PREFIX}.local`);
+  });
+
+  // Alta directa en client_tokens (crear vía API exigiría sesión Supabase, que
+  // no existe en este contexto). No se crean señales entregables aquí: estos
+  // tests cubren la barrera de vigencia del token (activo/caducado/revocado),
+  // no el fan-out — ese se validó de forma transaccional (rollback) contra la
+  // función SQL, sin tocar tráfico real.
+  async function seedClient(opts: { expiresAt?: string | null; revoked?: boolean }): Promise<{ token: string; id: string }> {
+    const token = `CLTEST_${TEST_PREFIX}_${Math.random().toString(36).slice(2)}`;
+    const { data, error } = await supabase
+      .from("client_tokens")
+      .insert({
+        token,
+        client_email: `c${Date.now()}${Math.random().toString(36).slice(2)}@${TEST_PREFIX}.local`,
+        client_phone: "+56900000000",
+        expires_at: opts.expiresAt ?? null,
+        revoked_at: opts.revoked ? new Date().toISOString() : null,
+      })
+      .select("id")
+      .single();
+    if (error) throw error;
+    return { token, id: data.id as string };
+  }
+
+  it("token de cliente ACTIVO → /api/signals responde 200 (aunque no haya nada que entregar)", async () => {
+    const { token } = await seedClient({ expiresAt: new Date(Date.now() + 86_400_000).toISOString() });
+    const res = await signalsGET(httpRequest(`/api/signals?token=${token}`));
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.ok).toBe(true);
+    expect(typeof body.count).toBe("number");
+    expect(typeof body.server_time).toBe("number");
+  });
+
+  it("token de cliente CADUCADO → 403 'token caducado', el EA del cliente deja de recibir", async () => {
+    const { token } = await seedClient({ expiresAt: new Date(Date.now() - 1000).toISOString() });
+    const res = await signalsGET(httpRequest(`/api/signals?token=${token}`));
+    const body = await res.json();
+    expect(res.status).toBe(403);
+    expect(body.error).toContain("caducado");
+  });
+
+  it("token de cliente REVOCADO → 403", async () => {
+    const { token } = await seedClient({ revoked: true });
+    const res = await signalsGET(httpRequest(`/api/signals?token=${token}`));
+    expect(res.status).toBe(403);
+  });
+
+  it("token de cliente inexistente → 401 (no 403)", async () => {
+    const res = await signalsGET(httpRequest(`/api/signals?token=CLTEST_${TEST_PREFIX}_no-existe`));
+    expect(res.status).toBe(401);
+  });
+
+  it("un token de cliente NO drena la cola del operador (claim_signals intacto)", async () => {
+    // Se ingesta una señal de prueba (is_test=true por PESSARO_ENV=test); ni el
+    // operador ni el cliente deben verla, pero probamos que el token de cliente
+    // toma su propio camino (claim_signals_for_client) sin error.
+    await webhookPOST(jsonRequest(`/api/webhook?token=${TV_TOKEN}`, entryPayload(SYM_BROADCAST)));
+    const { token } = await seedClient({ expiresAt: null }); // indefinido
+    const res = await signalsGET(httpRequest(`/api/signals?token=${token}`));
+    expect((await res.json()).ok).toBe(true);
+  });
+
+  // ---------- Portal del cliente (solo lectura) ----------
+
+  it("portal: token ACTIVO devuelve su token, señales entregadas y reporte agregado", async () => {
+    const { token, id } = await seedClient({ expiresAt: null });
+
+    // Ingesta una señal (is_test en la suite) y se le entrega directamente a
+    // este cliente insertando su fila de entrega — el portal la debe listar.
+    const ingest = await webhookPOST(
+      jsonRequest(`/api/webhook?token=${TV_TOKEN}`, entryPayload(SYM_BROADCAST, { grade: "ELITE" })),
+    );
+    const { id: signalId } = await ingest.json();
+    await supabase.from("client_deliveries").insert({ signal_id: signalId, client_id: id, status: "notified" });
+
+    const res = await portalGET(httpRequest(`/api/portal?token=${token}`));
+    const body = await res.json();
+    expect(res.status).toBe(200);
+    expect(body.ok).toBe(true);
+    expect(body.client.token).toBe(token);
+    expect(body.report.total).toBeGreaterThanOrEqual(1);
+    expect(body.signals.some((s: { symbol: string }) => s.symbol === SYM_BROADCAST)).toBe(true);
+    expect(body.report.bySymbol.some((s: { symbol: string }) => s.symbol === SYM_BROADCAST)).toBe(true);
+  });
+
+  it("portal: token CADUCADO → 403, inexistente → 401", async () => {
+    const { token } = await seedClient({ expiresAt: new Date(Date.now() - 1000).toISOString() });
+    expect((await portalGET(httpRequest(`/api/portal?token=${token}`))).status).toBe(403);
+    expect((await portalGET(httpRequest(`/api/portal?token=CLTEST_${TEST_PREFIX}_nope`))).status).toBe(401);
   });
 
   it("token inválido → 401, nada se inserta", async () => {

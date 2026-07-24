@@ -2,22 +2,23 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { settingsUpdateSchema } from "@/lib/schema";
 import { getSettings } from "@/lib/counts";
-import { isAuthorizedOperator } from "@/lib/auth";
+import { isSuperAdminOrOperator } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
-  if (!(await isAuthorizedOperator(req))) {
-    return NextResponse.json({ ok: false, error: "invalid token" }, { status: 401 });
+  if (!(await isSuperAdminOrOperator(req))) {
+    return NextResponse.json({ ok: false, error: "no autorizado" }, { status: 403 });
   }
   const settings = await getSettings();
   return NextResponse.json({ ok: true, settings });
 }
 
 export async function PUT(req: NextRequest) {
-  if (!(await isAuthorizedOperator(req))) {
-    return NextResponse.json({ ok: false, error: "invalid token" }, { status: 401 });
+  // Alterar umbrales del bridge es exclusivo de super_admin (o el operator token).
+  if (!(await isSuperAdminOrOperator(req))) {
+    return NextResponse.json({ ok: false, error: "no autorizado" }, { status: 403 });
   }
 
   let body: unknown;

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { getSettings } from "@/lib/counts";
-import { isAuthorizedOperator } from "@/lib/auth";
+import { isSuperAdminOrOperator } from "@/lib/auth";
 import { computeEaPollStatus } from "@/lib/tokens";
 
 export const runtime = "nodejs";
@@ -15,8 +15,10 @@ function parseOrigin(raw: string | null): OriginFilter {
 }
 
 export async function GET(req: NextRequest) {
-  if (!(await isAuthorizedOperator(req))) {
-    return NextResponse.json({ ok: false, error: "invalid token" }, { status: 401 });
+  // Panel operativo completo: solo super_admin (o operator token). Los admin
+  // se redirigen a /status/clients (su dashboard acotado).
+  if (!(await isSuperAdminOrOperator(req))) {
+    return NextResponse.json({ ok: false, error: "no autorizado" }, { status: 403 });
   }
 
   // §5.4: filtro de origen, por defecto en 'tradingview'. El panel marca un

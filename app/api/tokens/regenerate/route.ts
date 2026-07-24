@@ -12,6 +12,9 @@ export async function POST(req: NextRequest) {
   if (!user) {
     return NextResponse.json({ ok: false, error: "invalid session" }, { status: 401 });
   }
+  if (user.role !== "super_admin") {
+    return NextResponse.json({ ok: false, error: "solo super_admin" }, { status: 403 });
+  }
 
   let body: unknown;
   try {
