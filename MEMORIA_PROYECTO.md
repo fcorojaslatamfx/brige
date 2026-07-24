@@ -1,6 +1,10 @@
 # MEMORIA DEL PROYECTO · TD CONFLUENCE LONDRES → NUEVA YORK
 ### Pessaro Capital · Infraestructura de Trading Algorítmico
-**Última actualización:** 23 de julio de 2026 · **Versión vigente del indicador:** v1.1
+**Última actualización:** 24 de julio de 2026 · **Versión vigente del indicador:** v1.1 · **Contrato del bridge:** v2.0
+
+> **⚠ Iteración v3.0 del bridge aplicada el 24-jul-2026 (capas DB + bridge).** Ver
+> §12 al final de este documento. Falta la parte externa (Pine v2.0 en TradingView,
+> EA v2.0 en MT4, limpieza de alertas duplicadas) que no vive en el repo.
 
 > Este documento es la memoria viva del proyecto. Sirve como contexto completo para
 > cualquier sesión futura (Claude, Claude Code u otro desarrollador): qué se construyó,
@@ -225,6 +229,93 @@ acento dorado `#c9a84c` (claro `#f0d080`, profundo `#a8862c`), verde `#00d084`, 
 - [ ] Definir política ELITE del EA (ej. +25% lote o "solo ELITE")
 - [ ] Publicación Invite-Only del indicador en TradingView (protección de IP)
 - [ ] Futuro: port del EA a MQL5; estadísticas de rendimiento por grade en Supabase
+
+---
+
+## 12. ITERACIÓN v3.0 DEL BRIDGE (24-jul-2026)
+
+Corrección de los seis defectos raíz verificados con datos de producción
+(meta-prompt `METAPROMPT_PESSARO_BRIDGE_v3.md`). Se implementaron las **capas
+que viven en el repo** (base de datos + bridge Next.js + test suite); las capas
+externas quedan pendientes (ver "Pendiente" abajo).
+
+### Qué se aplicó
+
+**Contrato v2.0** (`lib/schema.ts`). Se separan dos conceptos que antes
+colapsaban en `timestamp`:
+- `ts_signal` (= `timenow`, instante real del disparo) → **frescura**.
+- `bar_time` (= `time`, apertura de la vela) → **deduplicación**.
+
+Antes, el disparo intrabarra llegaba con `time` (apertura), y contra
+`freshness_seconds=180` el 60 % del flujo moría como `stale` (lag hasta 897 s).
+Ahora la frescura se mide contra `timestamp` y el dedup contra `bar_time`.
+`bar_time` es **opcional**: si no viene (Pine v1.x) cae a `timestamp`, así el
+bridge sigue aceptando el payload viejo sin romperse.
+
+Nuevas acciones `SETUP_BUY` / `SETUP_SELL` / `SETUP_CANCEL`: el setup armado
+(orden límite pendiente colocable) que antes nunca salía del gráfico. Guardia de
+reloj: se rechaza con 400 todo `timestamp` con desfase > 1 h (reloj roto ≠ señal
+tardía).
+
+**Umbrales autoritativos** (migración 010, `calc_thresholds`). El bridge es la
+única fuente de verdad. Se calculan también para los setups; el bloque
+`thresholds` del payload al EA es **obligatorio o se omite entero** — nunca se
+manda con ceros (el `0/0` del panel era "contrato incompleto", no "cupo").
+Semántica `>=` (se marca al ALCANZAR el umbral). **Nunca suprime** la señal:
+`exceeded=true` es un adjetivo, no un verbo.
+
+**Aislamiento del test suite en 3 capas** (defecto 3, el más peligroso: un push
+falso al móvil del trader):
+1. **DB** (009/011): columnas `origin`/`is_test`/`env` con `NOT NULL`, CHECK de
+   coherencia, vista `signals_deliverable` y `claim_signals` que **sólo** ve
+   `origin='tradingview' + is_test=false + env='production'`. Imposible por
+   construcción que el EA reciba una fila de prueba.
+2. **Bridge** (`lib/origin.ts`): `origin` se deriva del **token + `PESSARO_ENV`**,
+   jamás del body. `claim_signals_test` (cola de prueba separada) sólo se sirve
+   con el token `operator` vía `?include_test=true`, nunca con el del EA.
+3. **EA**: cuarentena en el receptor (parte externa, EA v2.0).
+   Vitest corre con `PESSARO_ENV='test'` (`tests/setup.ts`) → todo su tráfico es
+   `is_test`. Test de regresión crítico añadido (§11.8): una señal `is_test`
+   nunca aparece en la cola del EA. **Verificado en producción: 0 fugas.**
+
+**Panel `/status`** (§5.4): embudo de entrega 48 h, latencia por acción con línea
+de frescura, aviso EA sin polling, filtro de origen (default `tradingview`, badge
+al ver tráfico no-producción). Funciones `delivery_funnel` / `latency_stats`
+(migración 012).
+
+**Observabilidad**: `tokens.last_used_at` para `kind='tv_webhook'` se toca en cada
+webhook (§1.6). Evento `audit` `expired_in_queue` con segundos en cola y si el EA
+polleó durante la espera (§5.5) — para probar que las 39 caducidades eran el
+terminal apagado, no el bridge.
+
+### Migraciones aplicadas a producción (`clyhqxzrmakteuraeaau`)
+
+`007_bar_time` · `008_setup_actions` · `009_test_isolation` ·
+`010_authoritative_thresholds` · `011_deliverable_view` · `012_status_analytics` ·
+`013_lockdown_calc_thresholds`.
+
+- El índice de dedup **antiguo** `ux_signals_dedup_live (symbol, action, ts_signal)`
+  se **conserva** junto al nuevo `ux_signals_dedup_bar_time` hasta que el Pine
+  v2.0 esté vivo (§3.3 / Fase 6). No eliminar antes.
+- `013` cierra una regresión: `calc_thresholds` es `SECURITY DEFINER` y quedaba
+  ejecutable por `anon`/`authenticated` vía PostgREST (bypass de RLS). Revocado a
+  sólo `service_role`. Advisor de seguridad limpio salvo avisos preexistentes.
+- Suite completa: **29/29 verde** (integración real contra Supabase, aislada).
+
+### Pendiente (fuera del repo)
+
+- **Fase 0 higiene**: exportar el Pine vivo de TradingView y commitearlo (el repo
+  no tiene `.pine`; TradingView y repo están desincronizados).
+- **Pine v2.0** (§4): `timenow`, `bar_time`, eventos de setup, `impulse_atr`
+  congelado al armar. **Publicar sólo después** de confirmar que llegan filas con
+  `bar_time` poblado (orden §3.3).
+- **EA v2.0** `PessaroBridgeEA_v2.mq4` (§7): entregado por separado, no está en el
+  repo. Lee `type`, acepta setups, lee `thresholds`, cuarentena `is_test`, panel
+  premium. Configurar `InpSymbolMap` contra los símbolos reales del bróker.
+- **Alertas TradingView** (§4.5): dejar **una sola** alerta "Any alert()" para
+  matar los 60 duplicados. Medir efecto aislado 24 h.
+- **Fase 6**: eliminar el índice de dedup antiguo y el fallback `bar_time=timestamp`
+  del bridge, sólo cuando ningún payload v1.x siga llegando.
 
 ---
 *Documento mantenido por Pessaro Capital. Al iniciar una nueva sesión de trabajo sobre

@@ -2,21 +2,35 @@ import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { webhookPayloadSchema, isEntrySignal, type WebhookPayload } from "@/lib/schema";
 import { getSettings, isFresh, safeTokenEquals } from "@/lib/counts";
-import { getToken } from "@/lib/tokens";
+import { getToken, touchTokenUsage } from "@/lib/tokens";
+import { resolveIngestContext, type IngestContext } from "@/lib/origin";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 const UNIQUE_VIOLATION = "23505";
 
-function toInsertRow(payload: WebhookPayload, nowMs: number) {
+// Un desfase de más de una hora entre el reloj de quien emite y el nuestro
+// no es una señal tardía sino un reloj roto: se rechaza sin encolar (§5.1).
+const MAX_CLOCK_SKEW_MS = 3_600_000;
+
+/** Apertura de vela para dedup; cae a timestamp cuando el Pine es v1.x (§5.1). */
+function resolveBarTime(payload: WebhookPayload): number {
+  return payload.bar_time ?? payload.timestamp;
+}
+
+function toInsertRow(payload: WebhookPayload, ctx: IngestContext, nowMs: number) {
   const base = {
     raw: payload,
     account_id: payload.account_id,
     action: payload.action,
     symbol: payload.symbol,
-    tf: payload.tf,
+    tf: payload.tf ?? null,
+    bar_time: resolveBarTime(payload),
     ts_signal: payload.timestamp,
+    origin: ctx.origin,
+    is_test: ctx.is_test,
+    env: ctx.env,
     created_at: new Date(nowMs).toISOString(),
   };
 
@@ -74,6 +88,16 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "invalid token" }, { status: 401 });
   }
 
+  // §1.6: el endpoint de webhook nunca actualizaba tokens.last_used_at para
+  // kind='tv_webhook' pese a recibir tráfico, así que /status no podía saber
+  // si TradingView seguía emitiendo. Se toca en cada request autenticado.
+  await touchTokenUsage("tv_webhook");
+
+  // §8 capa 2: el origen se deriva del token (aquí, siempre tv_webhook) y del
+  // entorno del despliegue; JAMÁS del body. Un preview de Vercel o una corrida
+  // local con el token real quedan marcados como prueba y no llegan al EA.
+  const ctx = resolveIngestContext("tv_webhook");
+
   let body: unknown;
   try {
     body = await req.json();
@@ -93,20 +117,37 @@ export async function POST(req: NextRequest) {
   const payload = parsed.data;
 
   const nowMs = Date.now();
-  const settings = await getSettings();
-  const row = toInsertRow(payload, nowMs);
 
+  // §5.1: reloj roto (desfase > 1 h en cualquier dirección) ≠ señal tardía.
+  // Se rechaza con 400 sin encolar y sin ensuciar las métricas de stale.
+  if (Math.abs(payload.timestamp - nowMs) > MAX_CLOCK_SKEW_MS) {
+    await supabase.from("audit").insert({
+      signal_id: null,
+      event_type: "invalid_payload",
+      detail: { reason: "clock_skew", ts_signal: payload.timestamp, now: nowMs },
+    });
+    return NextResponse.json({ ok: false, error: "clock skew: timestamp too far from server time" }, { status: 400 });
+  }
+
+  const settings = await getSettings();
+  const row = toInsertRow(payload, ctx, nowMs);
+  const barTime = resolveBarTime(payload);
+
+  // Frescura: SIEMPRE contra timestamp (timenow), nunca contra bar_time (§5.1).
   if (!isFresh(payload.timestamp, settings.freshness_seconds, nowMs)) {
     const id = await insertRejected(row, "stale", null);
     return NextResponse.json({ ok: false, id, status: "rejected_technical", reason: "stale" }, { status: 200 });
   }
 
+  // Deduplicación: SIEMPRE contra bar_time (apertura de vela estable), nunca
+  // contra timestamp — dos emisiones del mismo disparo comparten bar_time pero
+  // difieren en timenow por milisegundos (§3.3).
   const { data: existing } = await supabase
     .from("signals")
     .select("id")
     .eq("symbol", payload.symbol)
     .eq("action", payload.action)
-    .eq("ts_signal", payload.timestamp)
+    .eq("bar_time", barTime)
     .neq("status", "rejected_technical")
     .limit(1)
     .maybeSingle();
@@ -131,7 +172,7 @@ export async function POST(req: NextRequest) {
         .select("id")
         .eq("symbol", payload.symbol)
         .eq("action", payload.action)
-        .eq("ts_signal", payload.timestamp)
+        .eq("bar_time", barTime)
         .neq("status", "rejected_technical")
         .limit(1)
         .maybeSingle();

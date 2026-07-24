@@ -3,19 +3,44 @@ import { z } from "zod";
 /**
  * Contrato JSON del indicador "TD Confluence Londres Nueva York" (Pine v6).
  * No modificar los nombres de campo: los emite Pine tal cual.
- * Compatible con v1.0 (producción) y v1.2: grade, impulse_atr y los campos
- * de conteo/umbral se agregaron en v1.2 y son opcionales. grade/impulse_atr
- * caen a un default cuando faltan; los campos de conteo son best-effort (se
- * reinician si se recarga el script) y se guardan como origin_* solo para
- * auditoría — los definitivos se recalculan en Supabase (ver contar_dia /
- * fn_apply_authoritative_counts), por eso no necesitan default.
+ *
+ * CONTRATO v2.0 (meta-prompt v3.0 §3.1). Cambios respecto de v1.x:
+ *
+ *  - `timestamp` pasa a ser `timenow` (instante real de emisión) en vez de
+ *    `time` (apertura de la vela). Es lo único que se compara contra
+ *    freshness_seconds. Con el valor viejo, un disparo intrabarra podía
+ *    llegar con 897 s de "retraso" aparente y morir como stale.
+ *  - `bar_time` (nuevo, apertura de la vela) es la clave estable de
+ *    deduplicación. Opcional durante la transición: si no viene, el handler
+ *    cae a `timestamp`, que es exactamente lo que emitía el Pine v1.x.
+ *  - Se añaden SETUP_BUY / SETUP_SELL / SETUP_CANCEL: el setup armado es el
+ *    momento en que existe una orden límite pendiente colocable, y hasta
+ *    ahora no salía del gráfico.
+ *  - `schema` permite convivencia de versiones durante el despliegue.
+ *
+ * Sigue aceptando payloads v1.x sin cambios: grade/impulse_atr caen a un
+ * default y los campos de conteo son best-effort (se reinician si se recarga
+ * el script). Estos últimos se guardan como origin_* SOLO para auditoría de
+ * discrepancias; los definitivos los calcula Supabase (calc_thresholds /
+ * fn_apply_authoritative_counts), que es la única capa con visión de cartera.
  */
+
+/** Acciones que transportan niveles completos y consumen cupo del día. */
+export const ENTRY_ACTIONS = ["BUY_DUAL", "SELL_DUAL", "SETUP_BUY", "SETUP_SELL"] as const;
+/** Acciones de retiro: forma reducida, sin niveles. */
+export const CANCEL_ACTIONS = ["CANCEL_ALL", "SETUP_CANCEL"] as const;
+
+export type EntryAction = (typeof ENTRY_ACTIONS)[number];
+export type CancelAction = (typeof CANCEL_ACTIONS)[number];
+export type SignalAction = EntryAction | CancelAction;
 
 const baseFields = {
   account_id: z.string().min(1),
-  symbol: z.string().min(1),
-  tf: z.string().min(1),
-  timestamp: z.number().int().positive(), // epoch ms
+  symbol: z.string().min(1).max(20),
+  tf: z.string().min(1).optional(),
+  bar_time: z.number().int().positive().optional(), // apertura de vela → dedup
+  timestamp: z.number().int().positive(), // timenow → frescura
+  schema: z.string().optional(),
 };
 
 const originCountFields = {
@@ -33,9 +58,9 @@ const partialSchema = z.object({
 
 const entryFields = {
   ...baseFields,
-  type: z.string().optional(),
+  type: z.enum(["LIMIT", "STOP", "MARKET"]).default("LIMIT"),
   grade: z.enum(["ELITE", "STANDARD"]).default("STANDARD"),
-  impulse_atr: z.number().default(0),
+  impulse_atr: z.number().nonnegative().default(0),
   price: z.number().positive(),
   sl: z.number().positive(),
   partial_1: partialSchema,
@@ -46,20 +71,35 @@ const entryFields = {
 
 export const buySignalSchema = z.object({ action: z.literal("BUY_DUAL"), ...entryFields });
 export const sellSignalSchema = z.object({ action: z.literal("SELL_DUAL"), ...entryFields });
+export const setupBuySignalSchema = z.object({ action: z.literal("SETUP_BUY"), ...entryFields });
+export const setupSellSignalSchema = z.object({ action: z.literal("SETUP_SELL"), ...entryFields });
 export const cancelSignalSchema = z.object({ action: z.literal("CANCEL_ALL"), ...baseFields });
+export const setupCancelSignalSchema = z.object({ action: z.literal("SETUP_CANCEL"), ...baseFields });
 
 export const webhookPayloadSchema = z.discriminatedUnion("action", [
   buySignalSchema,
   sellSignalSchema,
+  setupBuySignalSchema,
+  setupSellSignalSchema,
   cancelSignalSchema,
+  setupCancelSignalSchema,
 ]);
 
-export type EntrySignalPayload = z.infer<typeof buySignalSchema> | z.infer<typeof sellSignalSchema>;
-export type CancelSignalPayload = z.infer<typeof cancelSignalSchema>;
+export type EntrySignalPayload =
+  | z.infer<typeof buySignalSchema>
+  | z.infer<typeof sellSignalSchema>
+  | z.infer<typeof setupBuySignalSchema>
+  | z.infer<typeof setupSellSignalSchema>;
+export type CancelSignalPayload = z.infer<typeof cancelSignalSchema> | z.infer<typeof setupCancelSignalSchema>;
 export type WebhookPayload = z.infer<typeof webhookPayloadSchema>;
 
 export function isEntrySignal(payload: WebhookPayload): payload is EntrySignalPayload {
-  return payload.action === "BUY_DUAL" || payload.action === "SELL_DUAL";
+  return (ENTRY_ACTIONS as readonly string[]).includes(payload.action);
+}
+
+/** true para SETUP_BUY / SETUP_SELL: hay una pendiente colocable, el precio aún no la tocó. */
+export function isSetupSignal(action: SignalAction): boolean {
+  return action === "SETUP_BUY" || action === "SETUP_SELL";
 }
 
 /** Body que envía el EA en POST /api/ack */

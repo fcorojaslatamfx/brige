@@ -17,9 +17,13 @@ type Settings = {
 
 type DayCount = { symbol: string; symbol_count: number; global_count: number };
 
+type SignalAction = "BUY_DUAL" | "SELL_DUAL" | "SETUP_BUY" | "SETUP_SELL" | "CANCEL_ALL" | "SETUP_CANCEL";
+
+type OriginFilter = "tradingview" | "test" | "manual" | "replay" | "all";
+
 type SignalRow = {
   id: string;
-  action: "BUY_DUAL" | "SELL_DUAL" | "CANCEL_ALL";
+  action: SignalAction;
   symbol: string;
   tf: string | null;
   grade: "ELITE" | "STANDARD" | null;
@@ -33,7 +37,19 @@ type SignalRow = {
   auth_threshold_exceeded: boolean | null;
   error: string | null;
   duplicate_of: string | null;
+  origin: string;
+  is_test: boolean;
   created_at: string;
+};
+
+type FunnelRow = { status: string; error: string | null; n: number; pct: number };
+type LatencyRow = {
+  action: string;
+  n: number;
+  lag_avg: number | null;
+  lag_min: number | null;
+  lag_max: number | null;
+  over_fresh: number;
 };
 
 type AuditRow = {
@@ -47,6 +63,7 @@ type AuditRow = {
 type StatusResponse = {
   ok: true;
   settings: Settings;
+  origin: OriginFilter;
   pending_count: number;
   recent_signals: SignalRow[];
   recent_audit: AuditRow[];
@@ -57,6 +74,8 @@ type StatusResponse = {
   last_poll_at: string | null;
   last_poll_latency_seconds: number | null;
   ea_online: boolean;
+  delivery_funnel: FunnelRow[];
+  latency_stats: LatencyRow[];
 };
 
 type SettingsForm = Partial<Pick<Settings, "symbol_threshold" | "global_threshold" | "freshness_seconds" | "queue_ttl_seconds">>;
@@ -69,10 +88,11 @@ export default function StatusPage() {
   const [error, setError] = useState<string | null>(null);
   const [savingSettings, setSavingSettings] = useState(false);
   const [form, setForm] = useState<SettingsForm>({});
+  const [origin, setOrigin] = useState<OriginFilter>("tradingview");
 
   const fetchStatus = useCallback(async () => {
     try {
-      const res = await fetch("/api/status", { cache: "no-store" });
+      const res = await fetch(`/api/status?origin=${origin}`, { cache: "no-store" });
       if (res.status === 401) {
         router.push("/login");
         return;
@@ -87,7 +107,7 @@ export default function StatusPage() {
     } catch {
       setError("No se pudo contactar al bridge.");
     }
-  }, [router]);
+  }, [router, origin]);
 
   useEffect(() => {
     fetchStatus();
@@ -152,6 +172,37 @@ export default function StatusPage() {
       </header>
 
       {error && <div className={styles.banner}>{error}</div>}
+
+      {data && !data.ea_online && (
+        <div className={styles.banner}>
+          ⚠ El EA no está haciendo polling
+          {data.last_poll_at ? ` (último poll ${formatRelative(data.last_poll_at)})` : " (sin registro de poll)"}. Durante
+          la ventana LON→NY esto significa señales caducando sin ser entregadas — revisa que el terminal esté encendido.
+        </div>
+      )}
+
+      <section className={styles.panel} style={{ paddingTop: 12, paddingBottom: 12 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <span className={styles.statLabel}>Origen del tráfico</span>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {(["tradingview", "test", "manual", "replay", "all"] as OriginFilter[]).map((o) => (
+              <button
+                key={o}
+                type="button"
+                onClick={() => setOrigin(o)}
+                className={styles.saveButton}
+                style={{
+                  opacity: origin === o ? 1 : 0.5,
+                  textTransform: "none",
+                }}
+              >
+                {o === "all" ? "todos" : o}
+              </button>
+            ))}
+          </div>
+          {origin !== "tradingview" && <Badge tone="warning">VIENDO TRÁFICO NO-PRODUCCIÓN</Badge>}
+        </div>
+      </section>
 
       <section className={styles.statGrid}>
         <StatTile label="Pendientes en cola" value={data ? String(data.pending_count) : "—"} />
@@ -239,6 +290,52 @@ export default function StatusPage() {
             {data.settings.updated_by ? ` · ${data.settings.updated_by}` : ""}
           </p>
         )}
+      </section>
+
+      <section className={styles.panel}>
+        <h2 className={styles.panelTitle}>Embudo de entrega · últimas 48 h</h2>
+        <DeliveryFunnel rows={data?.delivery_funnel ?? []} />
+      </section>
+
+      <section className={styles.panel}>
+        <h2 className={styles.panelTitle}>
+          Latencia de ingesta ts_signal → recepción · línea de frescura {data?.settings.freshness_seconds ?? "—"}s
+        </h2>
+        <table className={styles.table}>
+          <thead>
+            <tr>
+              <th>Acción</th>
+              <th>n</th>
+              <th>Lag medio</th>
+              <th>Lag mín</th>
+              <th>Lag máx</th>
+              <th>Sobre frescura</th>
+            </tr>
+          </thead>
+          <tbody>
+            {(data?.latency_stats ?? []).map((l) => (
+              <tr key={l.action} className={l.over_fresh > 0 ? styles.rowWarning : undefined}>
+                <td>
+                  <DirectionBadge action={l.action as SignalAction} />
+                </td>
+                <td className={styles.mono}>{l.n}</td>
+                <td className={styles.mono}>{l.lag_avg ?? "—"}s</td>
+                <td className={styles.mono}>{l.lag_min ?? "—"}s</td>
+                <td className={styles.mono}>{l.lag_max ?? "—"}s</td>
+                <td className={styles.mono}>
+                  {l.over_fresh > 0 ? <Badge tone="critical">{l.over_fresh}</Badge> : <Badge tone="ok">0</Badge>}
+                </td>
+              </tr>
+            ))}
+            {data && data.latency_stats.length === 0 && (
+              <tr>
+                <td colSpan={6} className={styles.emptyRow}>
+                  Sin señales en la ventana
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
       </section>
 
       <section className={styles.panel}>
@@ -355,9 +452,85 @@ function StatusBadge({ status }: { status: string }) {
   return <Badge tone={m.tone}>{m.label}</Badge>;
 }
 
-function DirectionBadge({ action }: { action: SignalRow["action"] }) {
-  if (action === "CANCEL_ALL") return <Badge tone="neutral">CANCEL</Badge>;
-  return <Badge tone={action === "BUY_DUAL" ? "buy" : "sell"}>{action === "BUY_DUAL" ? "BUY" : "SELL"}</Badge>;
+function DirectionBadge({ action }: { action: SignalAction }) {
+  // ◇ setup armado (pendiente colocable) · ◆ disparo (el precio tocó el nivel)
+  switch (action) {
+    case "CANCEL_ALL":
+    case "SETUP_CANCEL":
+      return <Badge tone="neutral">CANCEL</Badge>;
+    case "BUY_DUAL":
+      return <Badge tone="buy">◆ BUY</Badge>;
+    case "SELL_DUAL":
+      return <Badge tone="sell">◆ SELL</Badge>;
+    case "SETUP_BUY":
+      return <Badge tone="buy">◇ SETUP BUY</Badge>;
+    case "SETUP_SELL":
+      return <Badge tone="sell">◇ SETUP SELL</Badge>;
+    default:
+      return <Badge tone="neutral">{action}</Badge>;
+  }
+}
+
+function DeliveryFunnel({ rows }: { rows: FunnelRow[] }) {
+  if (rows.length === 0) return <p className={styles.emptyRow}>Sin señales en la ventana</p>;
+
+  const total = rows.reduce((sum, r) => sum + r.n, 0);
+  const by = (pred: (r: FunnelRow) => boolean) => rows.filter(pred).reduce((s, r) => s + r.n, 0);
+
+  // Embudo: recibidas → validadas (no rechazadas) → notificadas.
+  const rejected = by((r) => r.status === "rejected_technical");
+  const validated = total - rejected;
+  const notified = by((r) => r.status === "notified");
+  const rejectionsByReason = rows
+    .filter((r) => r.status === "rejected_technical")
+    .map((r) => ({ reason: r.error ?? "—", n: r.n }));
+
+  const steps = [
+    { label: "Recibidas", value: total },
+    { label: "Validadas", value: validated },
+    { label: "Notificadas", value: notified },
+  ];
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
+        {steps.map((s) => (
+          <div key={s.label} className={styles.statTile} style={{ flex: "1 1 120px" }}>
+            <span className={styles.statLabel}>{s.label}</span>
+            <span className={styles.statValue}>{s.value}</span>
+            <span className={styles.hint}>{total > 0 ? `${Math.round((100 * s.value) / total)}%` : "—"}</span>
+          </div>
+        ))}
+      </div>
+      <table className={styles.table}>
+        <thead>
+          <tr>
+            <th>Estado</th>
+            <th>Motivo</th>
+            <th>n</th>
+            <th>%</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r, i) => (
+            <tr key={`${r.status}-${r.error ?? "none"}-${i}`}>
+              <td>
+                <StatusBadge status={r.status} />
+              </td>
+              <td>{r.error ?? "—"}</td>
+              <td className={styles.mono}>{r.n}</td>
+              <td className={styles.mono}>{r.pct}%</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {rejectionsByReason.length > 0 && (
+        <p className={styles.hint}>
+          Rechazos técnicos: {rejectionsByReason.map((r) => `${r.reason} ${r.n}`).join(" · ")}
+        </p>
+      )}
+    </div>
+  );
 }
 
 function EaStatusBadge({ data }: { data: StatusResponse | null }) {

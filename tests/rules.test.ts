@@ -15,19 +15,24 @@ import { POST as ackPOST } from "../app/api/ack/route";
 // vacía (bootstrap local/CI), nunca como fallback en tiempo de request.
 const ENV_TV_TOKEN = process.env.TV_WEBHOOK_TOKEN;
 const ENV_EA_TOKEN = process.env.EA_TOKEN;
+const ENV_OPERATOR_TOKEN = process.env.OPERATOR_TOKEN;
 let TV_TOKEN: string | undefined;
 let EA_TOKEN: string | undefined;
+let OPERATOR_TOKEN: string | undefined;
 const BASE = "http://localhost";
 
 // Prefijo único por corrida: ningún instrumento real (XAUUSD, EURJPY, ...)
-// empieza así, y dos corridas de la suite nunca chocan entre sí.
-const TEST_PREFIX = `TESTSUITE${Date.now()}`;
+// empieza así, y dos corridas de la suite nunca chocan entre sí. Se mantiene
+// corto (base36 del timestamp) para que symbol+sufijo no pase el tope de 20
+// caracteres del contrato Zod (§5.1) — los símbolos reales no lo pasan.
+const TEST_PREFIX = `T${Date.now().toString(36).toUpperCase()}`;
 const SYM_BASIC = `${TEST_PREFIX}_BASIC`;
 const SYM_DUP = `${TEST_PREFIX}_DUP`;
 const SYM_STALE = `${TEST_PREFIX}_STALE`;
 const SYM_THRESHOLD = `${TEST_PREFIX}_THRESH`;
 const SYM_CLAIM = `${TEST_PREFIX}_CLAIM`;
 const SYM_ACK = `${TEST_PREFIX}_ACK`;
+const SYM_LEAK = `${TEST_PREFIX}_LEAK`;
 
 function httpRequest(path: string, init?: ConstructorParameters<typeof NextRequest>[1]) {
   return new NextRequest(new URL(path, BASE), init);
@@ -126,6 +131,33 @@ describe("lib/schema · contrato Zod (§2 del meta-prompt)", () => {
     });
     expect(result.success).toBe(true);
   });
+
+  it("§3.1: acepta SETUP_BUY / SETUP_SELL con niveles completos y bar_time/schema", () => {
+    for (const action of ["SETUP_BUY", "SETUP_SELL"] as const) {
+      const result = webhookPayloadSchema.safeParse(
+        entryPayload("XAUUSD", { action, bar_time: 1_700_000_000_000, timestamp: Date.now(), schema: "2.0" }),
+      );
+      expect(result.success).toBe(true);
+    }
+  });
+
+  it("§3.1: acepta SETUP_CANCEL con la forma reducida", () => {
+    const result = webhookPayloadSchema.safeParse({
+      account_id: "TD_CONF_LON_NY",
+      action: "SETUP_CANCEL",
+      symbol: "EURJPY",
+      tf: "15",
+      bar_time: 1_700_000_000_000,
+      timestamp: Date.now(),
+      schema: "2.0",
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it("bar_time es opcional (payload v1.x sigue válido)", () => {
+    // entryPayload no incluye bar_time: es exactamente un payload v1.x.
+    expect(webhookPayloadSchema.safeParse(entryPayload("XAUUSD")).success).toBe(true);
+  });
 });
 
 describe("lib/schema · ack y settings", () => {
@@ -180,6 +212,7 @@ describe("lib/counts · toEaPayload sobreescribe con conteos autoritativos", () 
     lots1: 0.01,
     lots2: 0.01,
     risk_usd: 50,
+    bar_time: 1_700_000_000_000,
     ts_signal: 1_700_000_000_000,
     origin_symbol_count: 1, // Pine cree que es la 1ª (p.ej. script recargado)
     origin_global_count: 1,
@@ -189,6 +222,9 @@ describe("lib/counts · toEaPayload sobreescribe con conteos autoritativos", () 
     auth_threshold_exceeded: true,
     symbol_threshold_snapshot: 3,
     global_threshold_snapshot: 6,
+    origin: "tradingview",
+    is_test: false,
+    env: "production",
     status: "pending",
     error: null,
     duplicate_of: null,
@@ -198,18 +234,52 @@ describe("lib/counts · toEaPayload sobreescribe con conteos autoritativos", () 
   };
 
   it("usa auth_* aunque origin_* traiga otro valor (discrepancia Pine)", () => {
-    const payload = toEaPayload(baseRow);
+    const payload = toEaPayload(baseRow) as Record<string, unknown>;
+    // Contrato plano v1 (retrocompatibilidad)
     expect(payload.current_symbol_count).toBe(4);
     expect(payload.current_global_count).toBe(7);
     expect(payload.symbol_threshold).toBe(3);
     expect(payload.global_threshold).toBe(6);
     expect(payload.threshold_exceeded).toBe(true);
+    // Contrato anidado v2.0 (§3.2)
+    expect(payload.thresholds).toEqual({
+      symbol_count: 4,
+      symbol_threshold: 3,
+      global_count: 7,
+      global_threshold: 6,
+      exceeded: true,
+    });
   });
 
-  it("CANCEL_ALL no lleva campos de niveles/conteo", () => {
-    const payload = toEaPayload({ ...baseRow, action: "CANCEL_ALL", symbol: "EURJPY" });
-    expect(payload).not.toHaveProperty("price");
+  it("§3.2: si falta cualquier columna autoritativa, OMITE thresholds — nunca lo manda con ceros", () => {
+    const payload = toEaPayload({ ...baseRow, auth_symbol_count: null }) as Record<string, unknown>;
+    expect(payload).not.toHaveProperty("thresholds");
     expect(payload).not.toHaveProperty("current_symbol_count");
+    expect(payload).not.toHaveProperty("threshold_exceeded");
+  });
+
+  it("SETUP_BUY lleva niveles y bloque thresholds igual que una entrada", () => {
+    const payload = toEaPayload({ ...baseRow, action: "SETUP_BUY" }) as Record<string, unknown>;
+    expect(payload.action).toBe("SETUP_BUY");
+    expect(payload.price).toBe(100);
+    expect(payload.thresholds).toBeDefined();
+  });
+
+  it("CANCEL_ALL y SETUP_CANCEL no llevan campos de niveles/conteo", () => {
+    for (const action of ["CANCEL_ALL", "SETUP_CANCEL"] as const) {
+      const payload = toEaPayload({ ...baseRow, action, symbol: "EURJPY" }) as Record<string, unknown>;
+      expect(payload).not.toHaveProperty("price");
+      expect(payload).not.toHaveProperty("thresholds");
+      expect(payload).not.toHaveProperty("current_symbol_count");
+    }
+  });
+
+  it("todo payload lleva la metadata de aislamiento (is_test/env/origin/bar_time)", () => {
+    const payload = toEaPayload(baseRow) as Record<string, unknown>;
+    expect(payload.is_test).toBe(false);
+    expect(payload.env).toBe("production");
+    expect(payload.origin).toBe("tradingview");
+    expect(payload.bar_time).toBe(1_700_000_000_000);
   });
 });
 
@@ -221,8 +291,20 @@ describe("lib/counts · toEaPayload sobreescribe con conteos autoritativos", () 
 // real usa y limpian sus propias filas en afterAll — pero SÍ escriben en la
 // base mientras corren. Si no hay credenciales en el entorno, se saltan.
 const hasLiveCreds = Boolean(
-  ENV_TV_TOKEN && ENV_EA_TOKEN && process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY,
+  ENV_TV_TOKEN &&
+    ENV_EA_TOKEN &&
+    ENV_OPERATOR_TOKEN &&
+    process.env.SUPABASE_URL &&
+    process.env.SUPABASE_SERVICE_ROLE_KEY,
 );
+
+// Cola de prueba: la suite corre con PESSARO_ENV='test' (tests/setup.ts), así
+// que sus ingests quedan is_test=true y NO los sirve la cola del EA. Para
+// ejercitar claim→ack se usa el camino explícito de prueba: token `operator`
+// + include_test=true (meta-prompt v3.0 §8 capa 2).
+function testClaim(max = 100) {
+  return signalsGET(httpRequest(`/api/signals?token=${OPERATOR_TOKEN}&include_test=true&max=${max}`));
+}
 
 /** Lee el token activo desde `tokens`; si la fila viene vacía, la siembra con el valor de la env var (bootstrap). */
 async function ensureTokenSeeded(kind: TokenKind, envValue: string | undefined): Promise<string | undefined> {
@@ -237,6 +319,7 @@ describe.skipIf(!hasLiveCreds)("reglas de negocio (integración contra Supabase 
   beforeAll(async () => {
     TV_TOKEN = await ensureTokenSeeded("tv_webhook", ENV_TV_TOKEN);
     EA_TOKEN = await ensureTokenSeeded("ea", ENV_EA_TOKEN);
+    OPERATOR_TOKEN = await ensureTokenSeeded("operator", ENV_OPERATOR_TOKEN);
   });
 
   // El test de "token inválido" deja una fila en `audit` sin signal_id (no
@@ -292,31 +375,58 @@ describe.skipIf(!hasLiveCreds)("reglas de negocio (integración contra Supabase 
     expect(body.reason).toBe("stale");
   });
 
-  it("la 4ª señal de entrada del día (umbral 3) SE ENTREGA con threshold_exceeded=true — nada se suprime", async () => {
+  it("al ALCANZAR el umbral por símbolo la señal SE ENTREGA con threshold_exceeded=true — nada se suprime", async () => {
+    // Independiente del valor configurado en settings: se emiten exactamente
+    // `symbol_threshold` señales y se comprueba que la última (que ALCANZA el
+    // umbral, semántica `>=` del §5.2) sale en ámbar sin ser rechazada.
+    const { data: cfg } = await supabase.from("settings").select("symbol_threshold").eq("id", 1).single();
+    const threshold = cfg?.symbol_threshold ?? 3;
+
     let last: { ok: boolean; auth_symbol_count?: number; auth_threshold_exceeded?: boolean } = { ok: false };
-    for (let i = 0; i < 4; i++) {
+    for (let i = 0; i < threshold; i++) {
       const res = await webhookPOST(
         jsonRequest(`/api/webhook?token=${TV_TOKEN}`, entryPayload(SYM_THRESHOLD, { timestamp: Date.now() + i })),
       );
       last = await res.json();
-      expect(last.ok).toBe(true); // ninguna de las 4 se rechaza por umbral
+      expect(last.ok).toBe(true); // ninguna se rechaza por umbral
     }
-    expect(last.auth_symbol_count).toBe(4);
+    expect(last.auth_symbol_count).toBe(threshold);
     expect(last.auth_threshold_exceeded).toBe(true);
   });
 
   it("claim atómico: GET /api/signals no entrega la misma señal dos veces", async () => {
     await webhookPOST(jsonRequest(`/api/webhook?token=${TV_TOKEN}`, entryPayload(SYM_CLAIM)));
 
-    const first = await signalsGET(httpRequest(`/api/signals?token=${EA_TOKEN}&max=100`));
+    const first = await testClaim();
     const firstBody = await first.json();
     const claimedIds = new Set<string>(firstBody.signals.map((s: { id: string }) => s.id));
     expect(claimedIds.size).toBeGreaterThan(0);
 
-    const second = await signalsGET(httpRequest(`/api/signals?token=${EA_TOKEN}&max=100`));
+    const second = await testClaim();
     const secondBody = await second.json();
     const overlap = secondBody.signals.filter((s: { id: string }) => claimedIds.has(s.id));
     expect(overlap.length).toBe(0);
+  });
+
+  it("§8/§11.8 · CRÍTICO: una señal is_test NUNCA aparece en la cola del EA (token ea)", async () => {
+    // Ingesta bajo PESSARO_ENV='test' → is_test=true, origin='test'.
+    const ingest = await webhookPOST(jsonRequest(`/api/webhook?token=${TV_TOKEN}`, entryPayload(SYM_LEAK)));
+    const { id } = await ingest.json();
+    expect(id).toBeTruthy();
+
+    // El EA (cola de producción) drena todo lo que pueda: la fila de prueba
+    // no puede estar entre lo entregado, ni ahora ni en polls sucesivos.
+    for (let i = 0; i < 3; i++) {
+      const res = await signalsGET(httpRequest(`/api/signals?token=${EA_TOKEN}&max=200`));
+      const body = await res.json();
+      expect(body.signals.some((s: { id: string }) => s.id === id)).toBe(false);
+    }
+
+    // Y en la base: la fila sigue 'pending', jamás pasó a 'claimed'/'notified'.
+    const { data } = await supabase.from("signals").select("status, is_test, origin").eq("id", id).single();
+    expect(data?.is_test).toBe(true);
+    expect(data?.origin).toBe("test");
+    expect(["pending", "expired"]).toContain(data?.status);
   });
 
   it("GET /api/signals válido registra el heartbeat aunque no haya señales pendientes, y computeEaPollStatus lo ve online", async () => {
@@ -340,7 +450,7 @@ describe.skipIf(!hasLiveCreds)("reglas de negocio (integración contra Supabase 
     const ingest = await webhookPOST(jsonRequest(`/api/webhook?token=${TV_TOKEN}`, entryPayload(SYM_ACK)));
     const { id } = await ingest.json();
 
-    const claimRes = await signalsGET(httpRequest(`/api/signals?token=${EA_TOKEN}&max=100`));
+    const claimRes = await testClaim();
     const claimed = (await claimRes.json()).signals.find((s: { id: string }) => s.id === id);
     expect(claimed).toBeTruthy();
 
