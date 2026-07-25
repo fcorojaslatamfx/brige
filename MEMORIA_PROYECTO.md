@@ -204,9 +204,17 @@ doble entrega.
 | `metaprompt_pessaro_bridge.md` | Meta-prompt v1 Python/VPS (descartado, referencia). |
 | `MEMORIA_PROYECTO.md` | Este documento. |
 
-**Identidad de marca Pessaro Capital:** fondo `#0c0f1a` (y capas `#141826/#1c2030/#252a3d`),
-acento dorado `#c9a84c` (claro `#f0d080`, profundo `#a8862c`), verde `#00d084`, rojo
-`#ff4d6d`; tipografías Playfair Display (títulos), DM Sans (cuerpo), DM Mono (código).
+**Identidad de marca Pessaro Capital:**
+
+> **⚠ Actualizado el 24-jul-2026 — el panel Next.js migró al sistema de diseño de
+> `pessaro.cl` (navy / púrpura / dorado). Ver §15.** Los valores de abajo (`#0c0f1a`/
+> `#c9a84c`) siguen vigentes SOLO para los artefactos fuera de `app/`: el EA `.mq4`
+> (constantes `PC_*`) y los manuales HTML del indicador. El dashboard web ya NO los usa.
+
+*(Identidad histórica del panel, hoy solo en `.mq4` y HTML):* fondo `#0c0f1a`
+(capas `#141826/#1c2030/#252a3d`), dorado `#c9a84c` (claro `#f0d080`, profundo
+`#a8862c`), verde `#00d084`, rojo `#ff4d6d`; Playfair Display (títulos), DM Sans
+(cuerpo), DM Mono (código).
 
 ---
 
@@ -387,6 +395,50 @@ super_admin.
   `buildClientReport`. No expone nada que altere el bridge.
 - Sin migraciones nuevas (reusa el esquema de la §13). Suite **41/41 verde**
   (portal + report + barreras de vigencia). Build limpio.
+
+---
+
+## 15. UNIFICACIÓN UX CON PESSARO.CL (24-jul-2026)
+
+Meta-prompt `METAPROMPT_UNIFICACION_UX_v1.md`. Migración **solo visual** (CSS/JSX;
+cero lógica, rutas, Zod, SQL o contrato) del panel Bridge al sistema de diseño
+"Navy / Púrpura / Dorado" ya validado en el sitio corporativo `pessaro.cl`.
+
+**Causa raíz corregida:** cada `.module.css` declaraba su propia copia de la
+paleta, y así se desincronizaron `/login` (que ya se había acercado a `pessaro.cl`)
+y `/status` (identidad vieja). Ahora hay **una sola fuente de verdad**:
+
+- **`app/theme.css` (nuevo):** tokens de marca en `:root` (navy 950→600, `--purple`
+  / `--purple-deep` / `--purple-light`, `--gold` / `--gold-light` / `--gold-deep`,
+  semánticos, `--border`, `--text-*`, timings `--ease-hover` / `--ease-reveal`),
+  importado **una vez** en `layout.tsx`. `login.module.css` y `status.module.css`
+  dejaron de declarar hexes y consumen `var(--…)`.
+
+**Jerarquía semántica de color** (la pieza que faltaba, no solo el color):
+- **PÚRPURA = navegación / acción primaria / foco:** nav Tokens·Usuarios·Clientes,
+  botones Invitar y Generar token, foco de inputs, enlace "¿olvidaste tu contraseña?",
+  badges `pending`/`claimed`.
+- **DORADO = premium:** solo Entrar, Guardar umbrales, set-password y **calidad
+  ELITE** (`badge_gold`). Antes el dorado servía para todo y diluía la señal ELITE.
+- **Fantasma (`.gateButton`):** utilidad, salir, destructivo (Cerrar sesión,
+  Revocar, Regenerar, Ver/Copiar, filtro de origen).
+
+**Animación importada (la técnica, no el HTML de marketing):** barrido de brillo en
+todo `<button>` (global en `theme.css`), `card-premium` en stat tiles (borde
+púrpura→dorado + elevación al hover) y en panels (borde sutil, sin elevación),
+reveal `opacity/translateY` al montar las secciones, header **sticky con glass**
+(`backdrop-filter: blur`), punto **pulsante** en EA ONLINE (estático en OFFLINE).
+`@media (prefers-reduced-motion: reduce)` global.
+
+**Tipografía sin cambios** (decisión consciente §2 del meta-prompt): se conserva
+Playfair Display + DM Sans + DM Mono; el principio "sans para cuerpo, mono estricta
+para cifras" ya se cumple.
+
+**Fuera de alcance (siguen con la identidad vieja):** EA `.mq4` (`PC_*`) y manuales
+HTML del indicador. Verificación §7.4 del meta-prompt limpia (cero hexes viejos
+fuera de `theme.css`, cero `--violet`, `--purple` solo en `theme.css`). Build limpio,
+41/41 tests. Entregado en la rama `feature/unificacion-ux-pessaro-cl`, consolidado en
+`staging`; **merge a `main` pendiente de revisión humana**.
 
 ---
 *Documento mantenido por Pessaro Capital. Al iniciar una nueva sesión de trabajo sobre
