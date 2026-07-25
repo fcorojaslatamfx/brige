@@ -95,7 +95,7 @@ export default function SetPasswordPage() {
               autoComplete="new-password"
               required
             />
-            <button type="submit" className={styles.gateButton} disabled={loading}>
+            <button type="submit" className={styles.saveButton} disabled={loading}>
               {loading ? "Guardando…" : "Guardar y entrar"}
             </button>
           </form>

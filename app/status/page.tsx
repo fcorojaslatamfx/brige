@@ -165,10 +165,10 @@ export default function StatusPage() {
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <EaStatusBadge data={data} />
-          <Link href="/status/tokens" className={styles.saveButton} style={{ textDecoration: "none" }}>
+          <Link href="/status/tokens" className={styles.navLink} style={{ textDecoration: "none" }}>
             Tokens
           </Link>
-          <Link href="/status/users" className={styles.saveButton} style={{ textDecoration: "none" }}>
+          <Link href="/status/users" className={styles.navLink} style={{ textDecoration: "none" }}>
             Usuarios
           </Link>
           <button type="button" onClick={handleLogout} className={styles.gateButton}>
@@ -196,7 +196,7 @@ export default function StatusPage() {
                 key={o}
                 type="button"
                 onClick={() => setOrigin(o)}
-                className={styles.saveButton}
+                className={styles.gateButton}
                 style={{
                   opacity: origin === o ? 1 : 0.5,
                   textTransform: "none",
@@ -438,7 +438,7 @@ function StatTile({ label, value, warning }: { label: string; value: string; war
   );
 }
 
-type BadgeTone = "ok" | "warning" | "critical" | "neutral" | "gold" | "buy" | "sell";
+type BadgeTone = "ok" | "warning" | "critical" | "neutral" | "gold" | "buy" | "sell" | "purple";
 
 function Badge({ tone, children }: { tone: BadgeTone; children: React.ReactNode }) {
   const toneClass = styles[`badge_${tone}` as keyof typeof styles];
@@ -447,8 +447,8 @@ function Badge({ tone, children }: { tone: BadgeTone; children: React.ReactNode 
 
 function StatusBadge({ status }: { status: string }) {
   const map: Record<string, { tone: BadgeTone; label: string }> = {
-    pending: { tone: "neutral", label: "PENDIENTE" },
-    claimed: { tone: "neutral", label: "RECLAMADA" },
+    pending: { tone: "purple", label: "PENDIENTE" },
+    claimed: { tone: "purple", label: "RECLAMADA" },
     notified: { tone: "ok", label: "NOTIFICADA" },
     rejected_technical: { tone: "critical", label: "RECHAZADA" },
     expired: { tone: "warning", label: "EXPIRADA" },
@@ -541,7 +541,15 @@ function DeliveryFunnel({ rows }: { rows: FunnelRow[] }) {
 
 function EaStatusBadge({ data }: { data: StatusResponse | null }) {
   if (!data) return <Badge tone="neutral">CARGANDO…</Badge>;
-  return data.ea_online ? <Badge tone="ok">● EA ONLINE</Badge> : <Badge tone="critical">● EA OFFLINE</Badge>;
+  return data.ea_online ? (
+    <Badge tone="ok">
+      <span className={styles.liveDot} /> EA ONLINE
+    </Badge>
+  ) : (
+    <Badge tone="critical">
+      <span className={styles.dotStatic} /> EA OFFLINE
+    </Badge>
+  );
 }
 
 function SettingsField({

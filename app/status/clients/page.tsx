@@ -206,7 +206,7 @@ export default function ClientsPage() {
         <div style={{ display: "flex", gap: 8 }}>
           {isSuper ? (
             <>
-              <Link href="/status/users" className={styles.gateButton} style={{ textDecoration: "none" }}>
+              <Link href="/status/users" className={styles.navLink} style={{ textDecoration: "none" }}>
                 Usuarios
               </Link>
               <Link href="/status" className={styles.gateButton} style={{ textDecoration: "none" }}>
@@ -279,7 +279,7 @@ export default function ClientsPage() {
             <option value="30d">Caduca en 30 días</option>
             <option value="never">Indefinido</option>
           </select>
-          <button type="submit" className={styles.saveButton} disabled={creating}>
+          <button type="submit" className={styles.navLink} disabled={creating}>
             {creating ? "Generando…" : "Generar token"}
           </button>
         </form>

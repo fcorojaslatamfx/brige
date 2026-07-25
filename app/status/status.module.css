@@ -1,19 +1,14 @@
+/*
+ * Panel operativo Bridge. Los colores NO se declaran aquí: vienen de
+ * app/theme.css (una sola fuente de verdad). Este módulo solo aporta
+ * geometría, animación de interacción y la jerarquía de botones:
+ *   .navLink  = púrpura (navegación / acción primaria)
+ *   .saveButton = dorado (premium: guardar / entrar)
+ *   .gateButton = fantasma (utilidad / salir / destructivo)
+ */
 .page {
-  --bg: #0c0f1a;
-  --surface-1: #141826;
-  --surface-2: #1c2030;
-  --surface-3: #252a3d;
-  --border: #2a2f45;
-  --gold: #c9a84c;
-  --gold-light: #f0d080;
-  --gold-deep: #a8862c;
-  --green: #00d084;
-  --red: #ff4d6d;
-  --text-primary: #f2f0ea;
-  --text-muted: #8b8fa3;
-
   min-height: 100vh;
-  background: var(--bg);
+  background: var(--navy-950);
   color: var(--text-primary);
   font-family: var(--font-dm-sans), sans-serif;
   padding: 32px 24px 64px;
@@ -23,15 +18,20 @@
   font-family: var(--font-dm-mono), monospace;
 }
 
-/* ---------- token gate ---------- */
+/* ---------- token gate / set-password ---------- */
 .gate {
   max-width: 420px;
   margin: 18vh auto 0;
-  background: var(--surface-1);
+  background: var(--navy-800);
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 40px 32px;
   text-align: center;
+  transition: border-color var(--ease-hover), box-shadow var(--ease-hover), transform var(--ease-hover);
+}
+.gate:hover {
+  border-color: rgba(108, 92, 231, 0.45);
+  box-shadow: 0 0 0 1px rgba(108, 92, 231, 0.2), 0 14px 34px rgba(0, 0, 0, 0.45);
 }
 .gateTitle {
   font-family: var(--font-playfair), serif;
@@ -51,7 +51,7 @@
 }
 .gateInput {
   flex: 1;
-  background: var(--surface-2);
+  background: var(--navy-700);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 10px 12px;
@@ -60,20 +60,8 @@
   font-size: 13px;
 }
 .gateInput:focus {
-  outline: 2px solid var(--gold);
+  outline: 2px solid var(--purple);
   outline-offset: 1px;
-}
-.gateButton {
-  background: var(--gold);
-  color: #1a1508;
-  border: none;
-  border-radius: 6px;
-  padding: 10px 18px;
-  font-weight: 700;
-  cursor: pointer;
-}
-.gateButton:hover {
-  background: var(--gold-light);
 }
 .errorText {
   color: var(--red);
@@ -81,16 +69,94 @@
   margin-top: 16px;
 }
 
-/* ---------- header ---------- */
+/* ---------- botones: jerarquía púrpura / dorado / fantasma ---------- */
+/* Dorado — premium (guardar / entrar). Barrido de brillo lo pone theme.css. */
+.saveButton {
+  background: linear-gradient(135deg, var(--gold-light), var(--gold-deep));
+  color: #1a1508;
+  border: none;
+  border-radius: 6px;
+  padding: 9px 20px;
+  font-weight: 700;
+  font-size: 13px;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  transition: filter var(--ease-hover);
+}
+.saveButton:hover {
+  filter: brightness(1.08);
+}
+.saveButton:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Púrpura — navegación y acción primaria (Tokens, Usuarios, Invitar, Generar). */
+.navLink {
+  background: linear-gradient(135deg, var(--purple), var(--purple-deep));
+  color: #ffffff;
+  border: none;
+  border-radius: 6px;
+  padding: 9px 18px;
+  font-weight: 700;
+  font-size: 13px;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  transition: filter var(--ease-hover), box-shadow var(--ease-hover);
+}
+.navLink:hover {
+  filter: brightness(1.1);
+  box-shadow: 0 6px 18px rgba(108, 92, 231, 0.35);
+}
+.navLink:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* Fantasma — utilidad, salir, destructivo (no compite con las dos anteriores). */
+.gateButton {
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 9px 16px;
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  transition: border-color var(--ease-hover), color var(--ease-hover);
+}
+.gateButton:hover {
+  border-color: var(--purple);
+  color: var(--text-primary);
+}
+.gateButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ---------- header (sticky + glass) ---------- */
 .header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
   display: flex;
   justify-content: space-between;
   align-items: flex-end;
   border-bottom: 1px solid var(--border);
-  padding-bottom: 20px;
+  padding: 12px 0 20px;
   margin-bottom: 24px;
   flex-wrap: wrap;
   gap: 12px;
+  background: rgba(7, 12, 22, 0.72);
+  backdrop-filter: blur(18px) saturate(1.3);
+  -webkit-backdrop-filter: blur(18px) saturate(1.3);
 }
 .title {
   font-family: var(--font-playfair), serif;
@@ -105,7 +171,7 @@
   margin: 4px 0 0;
 }
 .banner {
-  background: rgba(255, 77, 109, 0.12);
+  background: rgba(255, 71, 87, 0.12);
   border: 1px solid var(--red);
   color: var(--red);
   border-radius: 8px;
@@ -114,25 +180,32 @@
   margin-bottom: 20px;
 }
 
-/* ---------- stat tiles ---------- */
+/* ---------- stat tiles (card-premium: borde púrpura→dorado + elevación) ---------- */
 .statGrid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
   gap: 14px;
   margin-bottom: 28px;
+  animation: pc-reveal-in var(--ease-reveal) both;
 }
 .statTile {
-  background: var(--surface-1);
+  background: var(--navy-800);
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 16px 18px;
   display: flex;
   flex-direction: column;
   gap: 6px;
+  transition: transform var(--ease-hover), border-color var(--ease-hover), box-shadow var(--ease-hover);
+}
+.statTile:hover {
+  transform: translateY(-6px);
+  border-color: rgba(108, 92, 231, 0.5);
+  box-shadow: 0 0 0 1px rgba(108, 92, 231, 0.25), 0 14px 30px rgba(0, 0, 0, 0.4);
 }
 .statTileWarning {
   border-color: var(--gold);
-  background: linear-gradient(180deg, rgba(201, 168, 76, 0.08), transparent 60%);
+  background: linear-gradient(180deg, rgba(212, 166, 86, 0.09), transparent 60%);
 }
 .statLabel {
   font-size: 11px;
@@ -146,14 +219,20 @@
   font-weight: 500;
 }
 
-/* ---------- panels ---------- */
+/* ---------- panels (card-premium sin elevación: son contenedores de tablas) ---------- */
 .panel {
-  background: var(--surface-1);
+  background: var(--navy-800);
   border: 1px solid var(--border);
   border-radius: 10px;
   padding: 20px 22px;
   margin-bottom: 20px;
   overflow-x: auto;
+  transition: border-color var(--ease-hover), box-shadow var(--ease-hover);
+  animation: pc-reveal-in var(--ease-reveal) both;
+}
+.panel:hover {
+  border-color: rgba(108, 92, 231, 0.22);
+  box-shadow: 0 0 0 1px rgba(108, 92, 231, 0.12);
 }
 .panelTitle {
   font-family: var(--font-dm-sans), sans-serif;
@@ -185,11 +264,11 @@
 }
 .table td {
   padding: 8px 10px;
-  border-bottom: 1px solid var(--surface-2);
+  border-bottom: 1px solid var(--navy-700);
   vertical-align: middle;
 }
 .rowWarning {
-  background: rgba(201, 168, 76, 0.1);
+  background: rgba(212, 166, 86, 0.1);
   box-shadow: inset 3px 0 0 var(--gold);
 }
 .emptyRow {
@@ -225,24 +304,30 @@
   border: 1px solid rgba(0, 208, 132, 0.4);
 }
 .badge_warning {
-  background: rgba(201, 168, 76, 0.16);
+  background: rgba(212, 166, 86, 0.16);
   color: var(--gold-light);
-  border: 1px solid rgba(201, 168, 76, 0.45);
+  border: 1px solid rgba(212, 166, 86, 0.45);
 }
 .badge_critical {
-  background: rgba(255, 77, 109, 0.14);
+  background: rgba(255, 71, 87, 0.14);
   color: var(--red);
-  border: 1px solid rgba(255, 77, 109, 0.4);
+  border: 1px solid rgba(255, 71, 87, 0.4);
 }
 .badge_neutral {
-  background: rgba(139, 143, 163, 0.14);
+  background: rgba(154, 163, 184, 0.14);
   color: var(--text-muted);
   border: 1px solid var(--border);
 }
+/* Púrpura informativo — para estados neutros que hoy comparten el gris sin serlo. */
+.badge_purple {
+  background: rgba(108, 92, 231, 0.14);
+  color: var(--purple-light);
+  border: 1px solid rgba(108, 92, 231, 0.4);
+}
 .badge_gold {
-  background: rgba(201, 168, 76, 0.16);
+  background: rgba(212, 166, 86, 0.16);
   color: var(--gold-light);
-  border: 1px solid rgba(201, 168, 76, 0.45);
+  border: 1px solid rgba(212, 166, 86, 0.45);
 }
 .badge_buy {
   background: rgba(0, 208, 132, 0.14);
@@ -250,9 +335,27 @@
   border: 1px solid rgba(0, 208, 132, 0.4);
 }
 .badge_sell {
-  background: rgba(255, 77, 109, 0.14);
+  background: rgba(255, 71, 87, 0.14);
   color: var(--red);
-  border: 1px solid rgba(255, 77, 109, 0.4);
+  border: 1px solid rgba(255, 71, 87, 0.4);
+}
+
+/* Punto "en vivo": pulsa solo en estado positivo (EA ONLINE). */
+.liveDot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--green);
+  animation: pc-pulse-dot 1.6s ease-in-out infinite;
+}
+/* Estado negativo: mismo lugar, punto estático (pulsar un error comunica lo contrario). */
+.dotStatic {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--red);
 }
 
 /* ---------- settings editor ---------- */
@@ -270,7 +373,7 @@
   color: var(--text-muted);
 }
 .settingsInput {
-  background: var(--surface-2);
+  background: var(--navy-700);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 8px 10px;
@@ -279,25 +382,8 @@
   font-size: 13px;
 }
 .settingsInput:focus {
-  outline: 2px solid var(--gold);
+  outline: 2px solid var(--purple);
   outline-offset: 1px;
-}
-.saveButton {
-  background: var(--gold);
-  color: #1a1508;
-  border: none;
-  border-radius: 6px;
-  padding: 9px 20px;
-  font-weight: 700;
-  font-size: 13px;
-  cursor: pointer;
-}
-.saveButton:hover {
-  background: var(--gold-light);
-}
-.saveButton:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
 }
 .hint {
   color: var(--text-muted);

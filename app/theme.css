@@ -1,0 +1,102 @@
+/*
+ * Fuente única de los tokens de marca Pessaro Capital para el panel Bridge.
+ * Extraído 1:1 de pessaro_CL/src/index.css (24-jul-2026) — ver
+ * METAPROMPT_UNIFICACION_UX_v1.md para el detalle de la migración.
+ *
+ * Cualquier color nuevo se agrega AQUÍ, nunca dentro de un .module.css.
+ * Antes cada módulo declaraba su propia copia de la paleta, y así se
+ * desincronizaron /login y /status. Ahora hay una sola verdad.
+ *
+ * Jerarquía semántica (de pessaro.cl):
+ *   PÚRPURA = acento primario: navegación, CTAs, foco.
+ *   DORADO  = acento premium secundario: acción de "guardar/entrar" y,
+ *             sobre todo, calidad ELITE en las señales. No es el color por
+ *             defecto de todo.
+ */
+:root {
+  --navy-950: #070c16; /* fondo más profundo */
+  --navy-900: #0a1628; /* fondo de paneles/popover */
+  --navy-800: #101d34; /* superficie de card */
+  --navy-700: #182746; /* superficie secundaria */
+  --navy-600: #22345c; /* borde/hover sutil */
+
+  --purple: #6c5ce7; /* acento PRIMARIO — CTAs, navegación, foco */
+  --purple-deep: #5e17eb; /* variante profunda para gradientes */
+  --purple-light: #a29bfe; /* texto/ícono sobre fondo oscuro */
+
+  --gold: #d4a656; /* acento PREMIUM secundario — reservado a calidad */
+  --gold-light: #e8c374;
+  --gold-deep: #a8862c;
+
+  --green: #00d084; /* positivo / BUY / OK */
+  --red: #ff4757; /* negativo / SELL / crítico */
+  --blue: #0984e3; /* confianza / información */
+
+  --border: rgba(255, 255, 255, 0.08);
+  --text-primary: #f1f2f6;
+  --text-muted: #9aa3b8;
+
+  --ease-hover: 180ms ease-out;
+  --ease-reveal: 850ms cubic-bezier(0.16, 0.8, 0.3, 1);
+}
+
+/* ===================== vocabulario de animación ===================== */
+
+@keyframes pc-reveal-in {
+  from {
+    opacity: 0;
+    transform: translateY(28px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* Punto "en vivo" que respira — solo para estados positivos (EA ONLINE). */
+@keyframes pc-pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scale(0.65);
+  }
+}
+
+/*
+ * Barrido de brillo diagonal en hover, aplicado a TODO <button> activo del
+ * panel (el mismo lenguaje que .btn-gold/.btn-primary de pessaro.cl). Los
+ * enlaces de navegación (<a>) usan cambio de gradiente en su lugar.
+ */
+button:not(:disabled) {
+  position: relative;
+  overflow: hidden;
+}
+button:not(:disabled)::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(120deg, transparent 35%, rgba(255, 255, 255, 0.28) 50%, transparent 65%);
+  transform: translateX(-120%);
+  transition: transform var(--ease-reveal);
+  pointer-events: none;
+}
+button:not(:disabled):hover::after {
+  transform: translateX(120%);
+}
+
+/* ===================== accesibilidad ===================== */
+/* Calcado 1:1 del bloque de pessaro.cl: sin movimiento si el usuario lo pidió. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

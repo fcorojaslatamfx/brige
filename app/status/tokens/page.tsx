@@ -143,7 +143,7 @@ export default function TokensPage() {
                   <button
                     type="button"
                     onClick={() => handleRegenerate(t.kind)}
-                    className={styles.saveButton}
+                    className={styles.gateButton}
                     disabled={regenerating === t.kind}
                   >
                     {regenerating === t.kind ? "Regenerando…" : "Regenerar"}

@@ -141,7 +141,7 @@ export default function UsersPage() {
           <p className={styles.subtitle}>Usuarios del panel</p>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
-          <Link href="/status/clients" className={styles.saveButton} style={{ textDecoration: "none" }}>
+          <Link href="/status/clients" className={styles.navLink} style={{ textDecoration: "none" }}>
             Clientes
           </Link>
           <Link href="/status" className={styles.gateButton} style={{ textDecoration: "none" }}>
@@ -172,7 +172,7 @@ export default function UsersPage() {
             <option value="admin">Admin</option>
             <option value="super_admin">Super Admin</option>
           </select>
-          <button type="submit" className={styles.saveButton} disabled={inviting}>
+          <button type="submit" className={styles.navLink} disabled={inviting}>
             {inviting ? "Enviando…" : "Invitar"}
           </button>
         </form>

@@ -1,27 +1,17 @@
 /*
- * Paleta extraída en vivo de pessaro.cl (23-jul-2026): fondo #030915/#091423,
- * dorado #d4a656/#e8c374 (el mismo que usa el glow del logo del header ahí:
- * box-shadow rgba(212,166,86,.3) 0 6px 22px 0, border-radius 8px), violeta
- * #765cde como acento secundario. No son los mismos hex que status.module.css
- * (más orientado al panel operativo) — este módulo es específico de /login.
+ * /login. Los colores vienen de app/theme.css (fuente única). El fondo
+ * (.backdrop / .backdropOverlay) es tratamiento de imagen, no paleta de
+ * marca, y se deja intacto (ya se calibró antes). El púrpura de marca ahora
+ * tiene un uso real: el enlace "¿Olvidaste tu contraseña?" (navegación
+ * secundaria), diferenciado del dorado del botón primario "Entrar".
  */
 .page {
-  --bg: #030915;
-  --card-bg: #091423;
-  --gold: #d4a656;
-  --gold-light: #e8c374;
-  --violet: #765cde;
-  --text-primary: #f2f0ea;
-  --text-muted: #9aa3b8;
-  --red: #ff4d6d;
-  --mint: #00cf76;
-
   position: relative;
   min-height: 100vh;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--bg);
+  background: var(--navy-950);
   overflow: hidden;
   font-family: var(--font-dm-sans), sans-serif;
   padding: 24px;
@@ -39,7 +29,7 @@
 .backdropOverlay {
   position: absolute;
   inset: 0;
-  background: radial-gradient(120% 90% at 50% 0%, rgba(3, 9, 21, 0.35) 0%, rgba(3, 9, 21, 0.88) 55%, var(--bg) 100%);
+  background: radial-gradient(120% 90% at 50% 0%, rgba(3, 9, 21, 0.35) 0%, rgba(3, 9, 21, 0.88) 55%, var(--navy-950) 100%);
 }
 
 .card {
@@ -47,7 +37,7 @@
   z-index: 1;
   width: 100%;
   max-width: 400px;
-  background: rgba(9, 20, 35, 0.82);
+  background: rgba(10, 22, 40, 0.82);
   border: 1px solid rgba(212, 166, 86, 0.25);
   border-radius: 12px;
   padding: 40px 32px;
@@ -72,7 +62,7 @@
 }
 
 /* Mismo tratamiento que el logo del header en pessaro.cl: 8px de radio y un
-   brillo dorado suave debajo (rgba(212,166,86,.3) 0 6px 22px 0). */
+   brillo dorado suave debajo. */
 .logo {
   width: 64px;
   height: 64px;
@@ -122,12 +112,13 @@
   color: var(--text-muted);
 }
 .input:focus {
-  outline: 2px solid var(--gold);
+  outline: 2px solid var(--purple);
   outline-offset: 1px;
 }
 
+/* Botón primario "Entrar" — dorado premium (gradiente + barrido global de theme.css). */
 .button {
-  background: var(--gold);
+  background: linear-gradient(135deg, var(--gold-light), var(--gold-deep));
   color: #1a1508;
   border: none;
   border-radius: 6px;
@@ -136,15 +127,17 @@
   font-size: 14px;
   cursor: pointer;
   margin-top: 4px;
+  transition: filter var(--ease-hover);
 }
 .button:hover {
-  background: var(--gold-light);
+  filter: brightness(1.08);
 }
 .button:disabled {
   opacity: 0.6;
   cursor: not-allowed;
 }
 
+/* Enlace secundario — púrpura (navegación), no dorado: no compite con "Entrar". */
 .linkButton {
   background: none;
   border: none;
@@ -154,9 +147,10 @@
   cursor: pointer;
   text-decoration: underline;
   text-underline-offset: 2px;
+  transition: color var(--ease-hover);
 }
 .linkButton:hover {
-  color: var(--gold-light);
+  color: var(--purple-light);
 }
 
 .errorText {
@@ -166,7 +160,7 @@
 }
 
 .successText {
-  color: var(--mint);
+  color: var(--green);
   font-size: 13px;
   margin-top: 16px;
   line-height: 1.5;
