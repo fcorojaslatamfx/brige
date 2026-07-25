@@ -71,9 +71,6 @@ export default function LoginPage() {
         </div>
         <h1 className={styles.title}>Pessaro Capital</h1>
         <p className={styles.subtitle}>Brige Profesional de Trading</p>
-        <p className={styles.hint}>
-          {mode === "login" ? "Panel de administrador — ingresa con tu cuenta" : "Recuperar acceso al panel"}
-        </p>
 
         {mode === "login" ? (
           <form onSubmit={handleLogin} className={styles.form}>
