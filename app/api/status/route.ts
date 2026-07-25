@@ -14,6 +14,10 @@ function parseOrigin(raw: string | null): OriginFilter {
   return (ORIGIN_FILTERS as readonly string[]).includes(raw ?? "") ? (raw as OriginFilter) : "tradingview";
 }
 
+// PostgREST interpreta un .in([]) vacío como "sin filtro": este centinela lo
+// evita, garantizando "cero resultados" cuando no hay ids que filtrar.
+const NIL_UUID = "00000000-0000-0000-0000-000000000000";
+
 export async function GET(req: NextRequest) {
   // Panel operativo completo: solo super_admin (o operator token). Los admin
   // se redirigen a /status/clients (su dashboard acotado).
@@ -34,7 +38,24 @@ export async function GET(req: NextRequest) {
     .limit(50);
   if (origin !== "all") recentQuery.eq("origin", origin);
 
-  const [settings, pendingCountRes, auditRes, signalsRes, dayCountsRes, eaTokenRes, funnelRes, latencyRes] =
+  // §6: filtro por BRÓKER (destino), dinámico. Los brokers los define el
+  // super_admin al crear clientes → sin whitelist fija, solo guardarraíl de
+  // longitud. Como signals no conoce el bróker (la difusión no segmenta), este
+  // filtro = señales ENTREGADAS a clientes de ese bróker, resuelto en dos pasos
+  // vía client_deliveries.
+  const brokerParam = (req.nextUrl.searchParams.get("broker") ?? "all").slice(0, 80);
+  if (brokerParam !== "all") {
+    const { data: clientRows } = await supabase.from("client_tokens").select("id").eq("broker", brokerParam);
+    const clientIds = (clientRows ?? []).map((c) => c.id);
+    const { data: deliveryRows } = await supabase
+      .from("client_deliveries")
+      .select("signal_id")
+      .in("client_id", clientIds.length > 0 ? clientIds : [NIL_UUID]);
+    const signalIds = [...new Set((deliveryRows ?? []).map((d) => d.signal_id))];
+    recentQuery.in("id", signalIds.length > 0 ? signalIds : [NIL_UUID]);
+  }
+
+  const [settings, pendingCountRes, auditRes, signalsRes, dayCountsRes, eaTokenRes, funnelRes, latencyRes, brokersRes] =
     await Promise.all([
       getSettings(),
       supabase
@@ -49,7 +70,10 @@ export async function GET(req: NextRequest) {
       supabase.from("tokens").select("last_used_at").eq("kind", "ea").maybeSingle(),
       supabase.rpc("delivery_funnel", { p_hours: 48, p_origin: origin }),
       supabase.rpc("latency_stats", { p_hours: 48, p_origin: origin }),
+      supabase.from("client_tokens").select("broker").order("broker"),
     ]);
+
+  const brokers = [...new Set((brokersRes.data ?? []).map((r: { broker: string }) => r.broker))];
 
   const dayCounts = dayCountsRes.data ?? [];
   const globalCount = dayCounts[0]?.global_count ?? 0;
@@ -64,6 +88,8 @@ export async function GET(req: NextRequest) {
     ok: true,
     settings,
     origin,
+    broker: brokerParam,
+    brokers,
     pending_count: pendingCountRes.count ?? 0,
     recent_signals: signalsRes.data ?? [],
     recent_audit: auditRes.data ?? [],
