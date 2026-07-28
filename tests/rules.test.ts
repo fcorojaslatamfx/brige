@@ -178,7 +178,15 @@ describe("lib/schema · ack y settings", () => {
 });
 
 describe("lib/schema · tokens de cliente", () => {
-  const base = { client_email: "lead@ejemplo.com", client_phone: "+56912345678", expiry: "30d" as const };
+  const base = {
+    client_email: "lead@ejemplo.com",
+    client_phone: "+56912345678",
+    expiry: "30d" as const,
+    broker: "Tradeview",
+    account_type: "demo" as const,
+    account_number: "123456",
+    broker_server: "Tradeview-Demo",
+  };
 
   it("acepta una creación válida con caducidad y campos opcionales", () => {
     expect(createClientSchema.safeParse({ ...base, client_name: "Lead X" }).success).toBe(true);
@@ -189,6 +197,16 @@ describe("lib/schema · tokens de cliente", () => {
     expect(createClientSchema.safeParse({ ...base, client_email: "no-es-correo" }).success).toBe(false);
     expect(createClientSchema.safeParse({ ...base, client_phone: "" }).success).toBe(false);
     expect(createClientSchema.safeParse({ ...base, expiry: "90d" }).success).toBe(false);
+  });
+
+  it("§8.1: los 4 campos de bróker son obligatorios en el servidor (Zod sin .optional)", () => {
+    for (const field of ["broker", "account_number", "broker_server"] as const) {
+      const { [field]: _omit, ...rest } = base;
+      void _omit;
+      expect(createClientSchema.safeParse(rest).success).toBe(false);
+    }
+    expect(createClientSchema.safeParse({ ...base, broker: "" }).success).toBe(false);
+    expect(createClientSchema.safeParse({ ...base, account_type: "margin" }).success).toBe(false);
   });
 });
 
@@ -416,6 +434,10 @@ describe.skipIf(!hasLiveCreds)("reglas de negocio (integración contra Supabase 
         token,
         client_email: `c${Date.now()}${Math.random().toString(36).slice(2)}@${TEST_PREFIX}.local`,
         client_phone: "+56900000000",
+        broker: "TESTBROKER",
+        account_type: "demo",
+        account_number: "TEST123",
+        broker_server: "TESTBROKER-Demo",
         expires_at: opts.expiresAt ?? null,
         revoked_at: opts.revoked ? new Date().toISOString() : null,
       })

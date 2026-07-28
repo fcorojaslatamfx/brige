@@ -60,6 +60,8 @@ export async function POST(req: NextRequest) {
     detail: {
       client_id: created.id,
       client_email: created.client_email,
+      broker: created.broker,
+      account_type: created.account_type,
       expiry: input.expiry,
       expires_at: created.expires_at,
       created_by: caller.email ?? caller.id,

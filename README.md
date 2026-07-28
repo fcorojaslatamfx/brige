@@ -9,25 +9,39 @@ Dominio de producción: **`brige.pessaro.cl`**
 ## Arquitectura
 
 ```
-TradingView ──POST──▶ /api/webhook   (valida token + esquema Zod + frescura)
+TradingView ──POST──▶ /api/webhook   (valida token + esquema Zod v2.0 + frescura)
                             │
-                      [Supabase]     signals · audit · settings
+                      [Supabase]     signals · audit · settings · client_deliveries
                             │        conteo autoritativo en tiempo real
                             │
-MT4 PessaroBridgeEA ◀──GET /api/signals   (polling · payload enriquecido)
+MT4 PessaroBridgeEA ◀──GET /api/signals   (polling · consumo único · payload enriquecido)
         └──────────────POST /api/ack      (confirmación de notificación)
+Cliente ◀──────────────GET /api/signals   (mismo endpoint, token de cliente · difusión)
+        └───────────── /portal            (portal de solo lectura, sin login Supabase)
 Navegador ◀──────────── /status           (panel de monitoreo, login Supabase Auth)
                     ├─── /status/tokens   (ver/regenerar TV_WEBHOOK_TOKEN, EA_TOKEN, OPERATOR_TOKEN)
-                    └─── /status/users    (invitar/gestionar usuarios del panel — solo Super Admin)
+                    ├─── /status/users    (invitar/gestionar usuarios del panel — solo Super Admin)
+                    └─── /status/clients  (alta/compartir/revocar tokens de cliente)
 /api/users/invite ──▶ [Resend] ──▶ email con link de "configurar contraseña" ──▶ /set-password
 /api/auth/forgot-password ──▶ [Resend] ──▶ email con link de recuperación ──▶ /set-password
+/api/clients/share ──▶ [Resend] ──▶ email con el token de cliente ──▶ /portal
 ```
 
 Los tres tokens de integración (`tv_webhook`, `ea`, `operator`) viven en la tabla `tokens` de Supabase, no en env vars — se ven y regeneran desde `/status/tokens` sin redeploy. `/api/webhook`, `/api/signals` y `/api/ack` siguen validando un `?token=` estático (TradingView y MT4 no pueden manejar sesión), ahora leído de esa tabla. `/status` y `/api/settings` exigen sesión Supabase Auth (login); `/api/status` y `/api/settings` además aceptan el `OPERATOR_TOKEN` vigente como credencial alterna para scripts externos.
 
 Acceso al dashboard: tener sesión Supabase Auth ya no alcanza — hace falta además una fila en la tabla `user_roles` (`super_admin` o `admin`). Un `super_admin` invita usuarios desde `/status/users`; el invitado recibe un email (vía Resend) con un link de recuperación de Supabase que lo lleva a `/set-password` para definir su propia contraseña — nunca se envían contraseñas en texto plano. Revocar acceso borra la fila de `user_roles` sin tocar la cuenta de Supabase Auth (reversible con solo re-invitar).
 
-Cada señal trae, sobrescritos por Supabase, `current_symbol_count`, `current_global_count` y `threshold_exceeded` — los umbrales diarios (por símbolo y globales) son informativos y editables en caliente desde `/status` (vía `/api/settings`), sin bloquear ninguna señal técnicamente válida.
+Invitar un correo que **ya** tiene acceso reescribe su rol (`upsert`), así que la invitación tiene dos guardarraíles: no se puede cambiar el rol propio desde ahí, ni degradar al último `super_admin`. Si aun así el sistema queda sin ningún `super_admin` vivo, `/status/users` responde 403 y la única salida es fuera de la UI: `npx tsx scripts/set-user-role.ts <correo> super_admin`.
+
+**Tres roles, dos poblaciones distintas.** `super_admin` y `admin` son usuarios internos del panel (`user_roles`); `cliente` no es usuario del panel sino destinatario de señales (`client_tokens`), entra a `/portal` con su token y sin login Supabase. Un `super_admin` ve el panel completo; un `admin` es redirigido a `/status/clients` y ve solo los clientes que tiene asignados, sin poder generar ni revocar tokens ni configurar el bridge — las rutas que **configuran** el bridge (`/api/settings` GET+PUT, `/api/status`, `/api/tokens`, `/api/tokens/regenerate`) exigen `super_admin`.
+
+**Entrega de señales: dos colas con semánticas opuestas.** El EA del operador consume la cola (`claim_signals`, consumo único: una señal reclamada sale de la cola). Los clientes reciben por **difusión** (`claim_signals_for_client`): cada cliente recibe cada señal fresca entregable que aún no se le ha entregado, sin consumir la cola del operador. `client_deliveries` lleva una fila por señal × cliente.
+
+Cada señal trae, sobrescritos por Supabase, `current_symbol_count`, `current_global_count` y `threshold_exceeded` — los umbrales diarios (por símbolo y globales) son informativos y editables en caliente desde `/status` (vía `/api/settings`), sin bloquear ninguna señal técnicamente válida. El bridge es la **única fuente de verdad** de esos umbrales: el bloque `thresholds` va completo o se omite entero, nunca en ceros.
+
+**Contrato v2.0:** `ts_signal` (`timenow` de Pine) mide **frescura** y `bar_time` (`time` de la vela) sirve para **dedup** — antes un solo timestamp cumplía ambos fines y se pisaban entre sí. `bar_time` es opcional con fallback mientras Pine v1.x siga vivo. Acciones soportadas: `BUY`/`SELL`/`CANCEL` y `SETUP_BUY`/`SETUP_SELL`/`SETUP_CANCEL`.
+
+**Aislamiento del tráfico de prueba (3 capas):** en DB (`origin` / `is_test` / `env` con CHECK de coherencia, vista `signals_deliverable`, `claim_signals` solo producción), en el bridge (`lib/origin.ts` deriva el origen del token + `PESSARO_ENV`; la cola de prueba `claim_signals_test` solo se alcanza con token operator vía `?include_test=true`) y en el EA (externo). Cualquier `PESSARO_ENV` distinto de `production` marca **todo** el tráfico entrante como de prueba y lo excluye de la cola del EA — por eso los previews de Vercel deben tenerlo seteado.
 
 ## Stack tecnológico
 
@@ -47,7 +61,9 @@ Cada señal trae, sobrescritos por Supabase, `current_symbol_count`, `current_gl
 | `app/api/settings/` | GET/PUT de los umbrales editables (sesión Supabase Auth u `OPERATOR_TOKEN`). |
 | `app/api/status/` | Datos que alimenta el panel `/status`. |
 | `app/api/tokens/` | GET/regenerate de los tokens de integración (solo sesión, sin fallback). |
-| `app/api/users/` | GET (lista), `invite`, `role`, `revoke` — gestión de usuarios, solo `super_admin`. |
+| `app/api/users/` | GET (lista), `invite`, `role`, `revoke` — gestión de usuarios internos, solo `super_admin`. |
+| `app/api/clients/` | GET (lista), POST (alta), `share`, `revoke` — tokens de cliente. |
+| `app/api/portal/` | Datos del portal de cliente, autenticado por token de cliente (no por sesión). |
 | `app/api/cron/cleanup/` | Job diario (Vercel Cron) de limpieza/compactado de auditoría. |
 | `app/login/` | Login del dashboard (correo + contraseña, Supabase Auth), identidad visual Pessaro Capital + link "¿Olvidaste tu contraseña?". |
 | `app/api/auth/forgot-password/` | Reenvía el link de recuperación de Supabase a cuentas existentes en `user_roles` (público, no crea usuarios, no revela si un correo tiene acceso). |
@@ -55,18 +71,24 @@ Cada señal trae, sobrescritos por Supabase, `current_symbol_count`, `current_gl
 | `app/status/` | Panel de monitoreo con identidad Pessaro Capital. |
 | `app/status/tokens/` | Ver/copiar/regenerar los tres tokens de integración. |
 | `app/status/users/` | Invitar usuarios, cambiar rol, revocar acceso — solo `super_admin`. |
+| `app/status/clients/` | Alta de cliente (con datos de cuenta de broker), compartir por correo, revocar. |
+| `app/portal/` | Portal del cliente: su token, señales, símbolos y reporte. Solo lectura, sin login Supabase. |
+| `app/theme.css` | **Única** fuente de tokens de marca (navy / púrpura / dorado, semánticos, timings). Los `.module.css` consumen `var(--…)` y no declaran hexes. |
 | `middleware.ts` | Protege `/status/*` y `/login` con la sesión de Supabase Auth. |
 | `lib/schema.ts` | Esquemas Zod del contrato JSON (webhook, ack, settings, tokens, usuarios). |
 | `lib/supabase.ts` | Cliente de Supabase (service role) — signals/settings/audit/tokens/user_roles. |
 | `lib/supabase-server.ts` / `lib/supabase-browser.ts` | Clientes Supabase Auth (`@supabase/ssr`) para Route Handlers y componentes de cliente. |
 | `lib/tokens.ts` | Lookup/regeneración de tokens desde la tabla `tokens`. |
 | `lib/users.ts` | Lookup/gestión de usuarios y roles desde `user_roles` + Supabase Auth Admin API. |
+| `lib/clients.ts` | Tokens de cliente: alta, vigencia, entrega por difusión, reporte del portal. |
+| `lib/origin.ts` | Deriva `origin`/`is_test`/`env` del token + `PESSARO_ENV` (aislamiento del tráfico de prueba). |
 | `lib/email.ts` | Envío de emails (invitación + recuperación de contraseña) vía Resend, con `emailShell()` compartido que agrega el disclaimer legal de Pessaro Capital a todo correo saliente. |
 | `lib/pessaro-logo.ts` | Logo de Pessaro Capital embebido en base64 para `/login`. |
 | `lib/auth.ts` | Gate dual (sesión con rol vigente u `OPERATOR_TOKEN`) para `/api/status` y `/api/settings`. |
 | `lib/counts.ts` | Lógica de conteo autoritativo por símbolo/global. |
 | `mt4/PessaroBridgeEA.mq4` | Expert Advisor MQL4 — notificador, sin `OrderSend`. |
-| `supabase/migrations/` | Esquema SQL, ajuste de `search_path` y grants de `service_role` (en orden). |
+| `supabase/migrations/` | Esquema SQL — **aplicar en orden**, ver más abajo. |
+| `scripts/` | `create-admin-user.ts` y `backfill-tokens.ts` (setup inicial), `set-user-role.ts` (rescate de roles). |
 | `tests/` | Suite Vitest (`rules.test.ts`) y simulador manual (`send-test-signal.ts`). |
 | `docs/` | Especificación funcional y memoria histórica del proyecto (ver abajo). |
 
@@ -103,12 +125,31 @@ Copiar `.env.example` a `.env.local` y completar:
 | `TV_WEBHOOK_TOKEN` / `EA_TOKEN` / `OPERATOR_TOKEN` | Solo para el backfill inicial (`scripts/backfill-tokens.ts`) y bootstrap de tests locales — en runtime la fuente de verdad es la tabla `tokens`, gestionada desde `/status/tokens` |
 | `CRON_SECRET` | Valida el `Authorization: Bearer` que envía el cron de Vercel |
 | `ADMIN_EMAIL` / `ADMIN_INITIAL_PASSWORD` | Solo para el setup inicial (`scripts/create-admin-user.ts`), no se usan en runtime |
-| `RESEND_API_KEY` | Envío de emails de invitación (`app/api/users/invite`, `lib/email.ts`) |
+| `RESEND_API_KEY` | Envío de emails de invitación y de token de cliente (`lib/email.ts`) |
+| `PESSARO_ENV` | `production` solo en el despliegue real. Cualquier otro valor marca **todo** el tráfico entrante como `is_test=true` / `origin='test'` y lo excluye de la cola del EA — setear a `preview`/`local` en previews y desarrollo |
 | `APP_URL` | Base URL pública para el link de "configurar contraseña" del email de invitación; cae a `https://brige.pessaro.cl` si no está seteada — en local conviene `http://localhost:3000` |
 
 Generar tokens con `openssl rand -hex 32`.
 
-Migraciones SQL en `supabase/migrations/`, **aplicar en orden**: `001_schema.sql` → `002_function_search_path.sql` → `003_grant_service_role.sql` → `004_tokens.sql` → `005_user_roles.sql` → `006_ea_last_poll.sql`. La `003` no es opcional: sin ella, `service_role` no tiene permisos sobre `signals`/`audit`/`settings` y todas las rutas API fallan con `permission denied` aunque RLS esté bien configurado. La `006` agrega `tokens.last_used_at`, el heartbeat que usa `/status` para el badge EA online/offline (independiente de si hay señales pendientes que reclamar).
+Migraciones SQL en `supabase/migrations/`, **aplicar en orden `001` → `015`**. Todas están aplicadas en el proyecto de producción.
+
+| Migración | Qué agrega |
+|---|---|
+| `001_schema.sql` | Esquema base: `signals`, `audit`, `settings`. |
+| `002_function_search_path.sql` | Fija `search_path` de las funciones SQL. |
+| `003_grant_service_role.sql` | **No es opcional:** sin ella `service_role` no tiene permisos sobre `signals`/`audit`/`settings` y **todas** las rutas API fallan con `permission denied` aunque RLS esté bien configurado. |
+| `004_tokens.sql` | Tabla `tokens` — los tres tokens de integración salen de las env vars. |
+| `005_user_roles.sql` | `user_roles` (`super_admin`/`admin`). |
+| `006_ea_last_poll.sql` | `tokens.last_used_at`: heartbeat real del EA para el badge online/offline, independiente de si hay señales pendientes que reclamar. |
+| `007_bar_time.sql` | Separa `bar_time` (dedup) de `ts_signal` (frescura) — contrato v2.0. |
+| `008_setup_actions.sql` | Acciones `SETUP_BUY` / `SETUP_SELL` / `SETUP_CANCEL`. |
+| `009_test_isolation.sql` | `origin` / `is_test` / `env` + CHECK de coherencia. |
+| `010_authoritative_thresholds.sql` | `calc_thresholds`: el bridge como única fuente de verdad de los umbrales. |
+| `011_deliverable_view.sql` | Vista `signals_deliverable`; `claim_signals` solo entrega producción. |
+| `012_status_analytics.sql` | `delivery_funnel` y `latency_stats` para el panel. |
+| `013_lockdown_calc_thresholds.sql` | Cierra una regresión: `calc_thresholds` (SECURITY DEFINER) quedaba ejecutable por `anon` vía PostgREST → revocado a `service_role`. |
+| `014_client_tokens.sql` | `client_tokens` + `client_deliveries` + `claim_signals_for_client` (difusión). |
+| `015_client_broker_account.sql` | `client_tokens` gana `broker` / `account_type` (`demo`\|`real`) / `account_number` / `broker_server`, `NOT NULL` con backfill `'SIN_DATO'`. |
 
 En el dashboard de Supabase (Authentication → URL Configuration), el **Site URL** y los **Redirect URLs** deben apuntar al dominio real (`https://brige.pessaro.cl/set-password`), no a `localhost` — si quedan apuntando a localhost, los links de invitación/recuperación enviados por correo llevan a los usuarios a una URL inaccesible. Es config del dashboard de Supabase, no del código.
 
@@ -135,25 +176,39 @@ Los pasos detallados (whitelisting de WebRequest, cálculo del offset horario NY
 
 ## Estado actual / últimas piezas implementadas
 
-Según `git log`, el bridge está **completo y en producción** (`brige.pessaro.cl`) en su modo despachador manual (meta-prompt v3):
+El bridge está **completo y en producción** (`brige.pessaro.cl`) en su modo despachador manual (meta-prompt v3). El detalle cronológico de cada cambio, con su commit y sus migraciones, está en **`CHANGELOG.md`** — abajo va solo el resumen.
 
-1. Esquema SQL, API routes, EA notificador MQL4 (piezas 1–3).
-2. Panel `/status` con identidad visual Pessaro Capital (pieza 4).
-3. Migración aplicada a Supabase + correcciones post-deploy detectadas en producción.
-4. Pruebas Vitest y documentación de despliegue (pieza 5).
-5. **Dashboard de admin — login Supabase Auth + gestión de usuarios (pieza 6):** `user_roles` (`super_admin`/`admin`), invitación por correo vía Resend con link de Supabase a `/set-password`, `app/api/users/*` (list/invite/role/revoke) + `app/status/users` (UI, solo `super_admin`). Commiteado (`6efca47`) y desplegado. Probado end-to-end en producción con una cuenta de prueba: invitar → correo real (Resend) → `/set-password` → login, las 4 etapas confirmadas. En la prueba se encontraron y corrigieron 2 bugs: Supabase Auth Site URL/Redirect URLs apuntaban a `localhost` (config del dashboard de Supabase, corregida manualmente) y `/set-password` (`7c05547`) confiaba en la sesión ya activa del navegador en vez de canjear explícitamente el token del link con `setSession()` — podía sobreescribir la contraseña de la cuenta equivocada si el invitador tenía sesión abierta en la misma pestaña. Ya corregido.
-6. Fix de heartbeat del EA (`8375fc5`): el badge "EA online/offline" y "último poll" en `/status` dependían de `signals.claimed_at`, que solo avanza si hay una señal pendiente — con la cola vacía (caso normal) marcaba "EA OFFLINE" pese a que el EA autenticaba bien. Se agregó `tokens.last_used_at` (migración `006_ea_last_poll.sql`) como heartbeat real, actualizado en cada `GET /api/signals` con token válido. Fix relacionado (`a1f5d3e`): el cálculo de "hace Ns" en el navegador podía dar negativo por desfase de reloj del cliente; acotado con `Math.max(0, ...)`.
-7. **Rediseño de `/login` + recuperar contraseña + disclaimer legal (`581237d`):** `/login` con fondo `public/brige-login.jpg` y logo oficial de Pessaro Capital (mismo tratamiento visual que pessaro.cl), estilos propios en `app/login/login.module.css`. Nuevo flujo "¿Olvidaste tu contraseña?" vía `POST /api/auth/forgot-password` (público, nunca crea usuarios ni revela si un correo tiene acceso, solo reenvía el link a cuentas ya en `user_roles`). `lib/email.ts` centraliza un `emailShell()` que agrega el disclaimer legal obligatorio de Pessaro Capital (riesgo, exención de responsabilidad, RUT/domicilio) a todo correo saliente. Verificado en producción con `fcorojas.fx@gmail.com`.
+**Ruta de trabajo:** `feature/*` → `staging` → `main` → producción. Vercel despliega preview por rama y producción desde `main`.
 
-**Modelo de roles:** se comparó con `pessaro-crm` (repo hermano, 3 roles + tabla de perfil extendido `crm_staff_profiles`) y se decidió **mantener el modelo simple de 2 roles** (`super_admin`/`admin`) en Bridge — solo gestiona acceso al panel, no un CRM con múltiples módulos de equipo.
+1. **Piezas 1–5 del build inicial:** esquema SQL, API routes, EA notificador MQL4, panel `/status` con identidad Pessaro Capital, migración aplicada con correcciones post-deploy, pruebas Vitest y documentación de despliegue.
+2. **Dashboard de admin — login Supabase Auth + gestión de usuarios:** `user_roles`, invitación por Resend, `app/api/users/*` + `app/status/users`. Probado end-to-end en producción (invitar → correo real → `/set-password` → login). La prueba destapó un bug crítico ya corregido (`7c05547`): `/set-password` confiaba en la sesión activa del navegador en vez de canjear el token del link con `setSession()`, y podía sobreescribir la contraseña de la cuenta equivocada.
+3. **Tokens de integración en base de datos:** se ven y regeneran desde `/status/tokens` sin redeploy.
+4. **Fix del heartbeat del EA:** `tokens.last_used_at` como señal real de vida, independiente de si hay señales pendientes que reclamar.
+5. **Rediseño de `/login` + recuperar contraseña + disclaimer legal:** flujo público que no crea usuarios ni revela si un correo tiene acceso; `emailShell()` agrega el disclaimer legal de Pessaro Capital a todo correo saliente.
+6. **Contrato v2.0 del bridge:** frescura y dedup separados, acciones `SETUP_*`, umbrales autoritativos y aislamiento del tráfico de prueba en 3 capas (migraciones 007–013).
+7. **Tokens de cliente + dashboards por rol:** entrega por difusión, portal de cliente, y endurecimiento de las rutas que configuran el bridge a `super_admin` (migración 014).
+8. **Unificación UX con pessaro.cl:** `app/theme.css` como única fuente de tokens de marca, con jerarquía semántica de color (púrpura = navegación/CTA, dorado = premium y ELITE).
+9. **Datos de cuenta de broker por cliente + filtro por broker en `/status`** (migración 015).
+10. **Guardarraíles de rol en la invitación** + `scripts/set-user-role.ts` como rescate por CLI.
+
+**Modelo de roles:** se comparó con `pessaro-crm` (repo hermano, 3 roles + tabla de perfil extendido `crm_staff_profiles`) y se decidió mantener el modelo simple en Bridge, que solo gestiona acceso al panel y no un CRM con múltiples módulos de equipo. El rol `cliente` que llegó después no contradice eso: no es un usuario del panel sino un destinatario de señales, y vive en `client_tokens`, no en `user_roles`.
 
 **Pendiente / a vigilar:**
+- **Piezas externas del meta-prompt v3.0**, que no viven en este repo: Pine v2.0 en TradingView, EA v2.0 en MT4 y la limpieza de alertas duplicadas. Hasta que Pine v2.0 esté vivo, `bar_time` sigue siendo opcional con fallback y se conserva el índice de dedup viejo junto al nuevo.
 - Los links de recuperación entregados por email llegaron con el token ya invalidado (`otp_expired`) en 2 intentos vía Gmail, mientras que un link generado directo funcionó a la primera — sugiere que algo en el camino de entrega (Gmail y/o el proxy de Resend) pre-visita el link de un solo uso. No investigado a fondo; si se repite con invitaciones reales, considerar que el email lleve a una página propia con un botón a clickear en vez de un link GET directo al endpoint de Supabase.
+- **Cobertura de tests:** `tests/rules.test.ts` cubre el contrato y las reglas de señales; las barreras de autorización de las rutas de usuarios y clientes no tienen tests automatizados.
 
 ## Documentación
 
-- `docs/metaprompt_pessaro_bridge_v3_despachador.md` — especificación funcional completa del bridge (arquitectura, reglas, despliegue paso a paso, troubleshooting).
-- `MEMORIA_PROYECTO.md` (raíz del repo) — historial de decisiones de todo el sistema Pessaro (indicador TradingView + bridge), incluyendo el contrato JSON vigente y el roadmap general.
+| Archivo | Qué es |
+|---|---|
+| `README.md` (este archivo) | Cómo está construido y cómo se corre/despliega **hoy**. Estado, no historia. |
+| `CHANGELOG.md` | Registro unificado de cada cambio, con su commit, sus migraciones y su estado de despliegue. |
+| `MEMORIA_PROYECTO.md` | Decisiones de diseño y el porqué de todo el sistema Pessaro (indicador TradingView + bridge), con el contrato JSON vigente y el roadmap general. |
+| `docs/metaprompt_pessaro_bridge_v3_despachador.md` | Especificación funcional completa del bridge (arquitectura, reglas, despliegue paso a paso, troubleshooting). |
+| `METAPROMPT_*.md` | El prompt de entrada de cada iteración grande. Insumo histórico, no documentación viva — si contradicen al README, manda el README. |
+
+Al iniciar una sesión de trabajo sobre este proyecto, el contexto mínimo útil es `MEMORIA_PROYECTO.md` + `CHANGELOG.md`.
 
 ## Licencia
 

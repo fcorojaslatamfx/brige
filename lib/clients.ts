@@ -16,6 +16,10 @@ export type ClientTokenRow = {
   client_name: string | null;
   client_email: string;
   client_phone: string;
+  broker: string;
+  account_type: "demo" | "real";
+  account_number: string;
+  broker_server: string;
   assigned_admin: string | null;
   expires_at: string | null;
   created_by: string | null;
@@ -54,6 +58,10 @@ export async function createClientToken(input: {
   client_name?: string | null;
   client_email: string;
   client_phone: string;
+  broker: string;
+  account_type: "demo" | "real";
+  account_number: string;
+  broker_server: string;
   assigned_admin?: string | null;
   expiry: ClientExpiry;
   created_by: string;
@@ -66,6 +74,10 @@ export async function createClientToken(input: {
       client_name: input.client_name?.trim() || null,
       client_email: input.client_email.toLowerCase().trim(),
       client_phone: input.client_phone.trim(),
+      broker: input.broker.trim(),
+      account_type: input.account_type, // viene de un <select> cerrado, sin trim
+      account_number: input.account_number.trim(),
+      broker_server: input.broker_server.trim(),
       assigned_admin: input.assigned_admin ?? null,
       expires_at: computeExpiresAt(input.expiry),
       created_by: input.created_by,

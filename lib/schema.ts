@@ -161,6 +161,13 @@ export const createClientSchema = z.object({
   client_phone: z.string().min(3).max(30),
   assigned_admin: z.string().uuid().optional(),
   expiry: clientExpirySchema,
+  // Datos de la cuenta de bróker del cliente. Los cuatro son obligatorios: sin
+  // `.optional()` es el mecanismo real de "requerido" (el `required` de HTML lo
+  // podría saltar un fetch directo a la API).
+  broker: z.string().trim().min(1, "El bróker es obligatorio").max(80),
+  account_type: z.enum(["demo", "real"], { errorMap: () => ({ message: "Tipo de cuenta inválido" }) }),
+  account_number: z.string().trim().min(1, "El número de cuenta es obligatorio").max(40),
+  broker_server: z.string().trim().min(1, "El servidor del bróker es obligatorio").max(80),
 });
 export type CreateClientInput = z.infer<typeof createClientSchema>;
 

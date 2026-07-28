@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { getAuthenticatedUser } from "@/lib/auth";
-import { createOrGetAuthUser, upsertUserRole, generateRecoveryLink } from "@/lib/users";
+import { countSuperAdmins, createOrGetAuthUser, getUserRole, upsertUserRole, generateRecoveryLink } from "@/lib/users";
 import { sendInviteEmail } from "@/lib/email";
 import { inviteUserSchema } from "@/lib/schema";
 
@@ -37,7 +37,29 @@ export async function POST(req: NextRequest) {
     const authUser = await createOrGetAuthUser(email);
     userId = authUser.id;
     isExisting = authUser.isExisting;
+  } catch (e) {
+    return NextResponse.json({ ok: false, error: e instanceof Error ? e.message : "error desconocido" }, { status: 500 });
+  }
 
+  // Invitar un correo que YA tiene acceso reescribe su rol (upsert). Sin estos
+  // guardarraíles, invitarse a uno mismo como "admin" —un tipeo del propio
+  // correo en el formulario— degrada silenciosamente al super_admin que está
+  // invitando y deja el panel sin nadie que pueda gestionar usuarios: /status/users
+  // pasa a responder 403 y solo se recupera por fuera (scripts/set-user-role.ts).
+  const currentRole = isExisting ? await getUserRole(userId) : null;
+
+  if (userId === caller.id && currentRole && role !== currentRole) {
+    return NextResponse.json(
+      { ok: false, error: "no puedes cambiar tu propio rol desde una invitación" },
+      { status: 400 },
+    );
+  }
+
+  if (currentRole === "super_admin" && role === "admin" && (await countSuperAdmins()) <= 1) {
+    return NextResponse.json({ ok: false, error: "no puedes degradar al último super_admin" }, { status: 400 });
+  }
+
+  try {
     await upsertUserRole(userId, role, caller.id);
 
     const actionLink = await generateRecoveryLink(email);
