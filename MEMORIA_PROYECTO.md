@@ -1,10 +1,14 @@
 # MEMORIA DEL PROYECTO · TD CONFLUENCE LONDRES → NUEVA YORK
 ### Pessaro Capital · Infraestructura de Trading Algorítmico
-**Última actualización:** 24 de julio de 2026 · **Versión vigente del indicador:** v1.1 · **Contrato del bridge:** v2.0
+**Última actualización:** 27 de julio de 2026 · **Versión vigente del indicador:** v1.1 · **Contrato del bridge:** v2.0
 
 > **⚠ Iteración v3.0 del bridge aplicada el 24-jul-2026 (capas DB + bridge).** Ver
 > §12 al final de este documento. Falta la parte externa (Pine v2.0 en TradingView,
 > EA v2.0 en MT4, limpieza de alertas duplicadas) que no vive en el repo.
+
+> **Secciones más recientes:** §13–14 tokens de cliente y dashboards por rol ·
+> §15 unificación UX · §16 datos de cuenta de broker · §17 guardarraíles de rol.
+> El registro cronológico por commit vive en `CHANGELOG.md`.
 
 > Este documento es la memoria viva del proyecto. Sirve como contexto completo para
 > cualquier sesión futura (Claude, Claude Code u otro desarrollador): qué se construyó,
@@ -441,5 +445,65 @@ fuera de `theme.css`, cero `--violet`, `--purple` solo en `theme.css`). Build li
 `staging`; **merge a `main` pendiente de revisión humana**.
 
 ---
+
+## 16. DATOS DE CUENTA DE BROKER POR CLIENTE (24-jul-2026)
+
+Meta-prompt `METAPROMPT_BROKER_ACCOUNT_v1.md`. Alcance acotado a **alta de cliente y
+panel general**; `/status/users` (usuarios internos) queda fuera a propósito.
+
+**Migración `015_client_broker_account.sql`** (aplicada a producción: 0 filas, no-op):
+`client_tokens` gana `broker`, `account_type` (`'demo'|'real'` con CHECK),
+`account_number` y `broker_server`, los cuatro `NOT NULL` con backfill idempotente
+`'SIN_DATO'` para filas previas.
+
+**Obligatorio de verdad:** en `createClientSchema` los 4 campos van **sin**
+`.optional()`. El `required` de HTML solo protege el formulario; la validación Zod
+protege la API, que es por donde realmente puede entrar una fila incompleta.
+
+**Visibilidad del riesgo en la UI:** la columna "Cuenta" aparece en **ambas** vistas
+de `/status/clients` (super_admin y admin) — REAL en rojo (`badge_critical`), DEMO
+neutro, SIN_DATO en ámbar. La distinción demo/real es la que cambia la consecuencia
+de una señal mal entregada, así que se muestra siempre, no bajo un detalle.
+
+**Filtro por broker en `/status`, indirecto por diseño:** `signals` no conoce el
+broker — el broker es un atributo del **cliente**, no de la señal. El filtro se
+puebla dinámicamente desde `client_tokens` (sin whitelist, así un broker nuevo
+aparece solo) y filtra por señales **entregadas** a clientes de ese broker vía
+`client_deliveries`, en dos pasos, con un centinela UUID para no emitir un `.in([])`
+vacío. `delivery_funnel` y `latency_stats` se dejaron por **origen**, no por broker:
+miden salud del bridge, no distribución comercial.
+
+---
+
+## 17. GUARDARRAÍLES DE ROL EN LA INVITACIÓN (27-jul-2026)
+
+**Causa raíz:** invitar un correo que **ya** tiene acceso no es un alta, es un
+`upsert` de su rol. La UI no distinguía ambos casos, así que tipear el propio correo
+como `admin` en el formulario de invitación degradaba en silencio al `super_admin`
+que estaba invitando. Consecuencia: `/status/users` pasa a responder 403 y **no
+queda nadie** capaz de revertirlo desde el panel — el sistema se cierra sobre sí mismo.
+
+**Dos guardarraíles en `app/api/users/invite/route.ts`:** no se puede cambiar el rol
+propio desde una invitación (400), ni degradar al último `super_admin` (400). El
+segundo es defensa en profundidad: como la ruta ya exige que quien invita sea
+`super_admin`, en la práctica el primero atrapa el caso antes de que el segundo se
+evalúe. Se dejó igual porque no cuesta nada y cubre el caso si mañana cambia el gate.
+
+**`scripts/set-user-role.ts` (nuevo):** la salida de emergencia si aun así se llega
+a quedar sin ningún `super_admin` vivo —
+`npx tsx scripts/set-user-role.ts <correo> <super_admin|admin>`. Import dinámico de
+`lib/supabase` **después** de que dotenv inyecte las env vars, porque ese módulo las
+lee al cargarse.
+
+**Aprendizaje general:** toda operación de `upsert` disparada desde un formulario de
+"invitar/agregar" merece revisarse por el caso "el destinatario ya existe" — la
+etiqueta del botón dice alta, pero el efecto puede ser una modificación destructiva.
+
+**Sin cobertura automatizada:** `tests/rules.test.ts` cubre reglas de trading y el
+contrato de señales, no las barreras de autorización de las rutas de usuarios. Los
+dos guardarraíles se verifican a mano.
+
+---
 *Documento mantenido por Pessaro Capital. Al iniciar una nueva sesión de trabajo sobre
-este proyecto, compartir este archivo como contexto inicial.*
+este proyecto, compartir este archivo como contexto inicial, junto con `CHANGELOG.md`
+(registro por cambio) y `README.md` (estado actual del repo).*

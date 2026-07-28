@@ -17,6 +17,10 @@ type ClientRow = {
   client_name: string | null;
   client_email: string;
   client_phone: string;
+  broker: string;
+  account_type: "demo" | "real";
+  account_number: string;
+  broker_server: string;
   assigned_admin: string | null;
   assigned_admin_email: string | null;
   expires_at: string | null;
@@ -54,6 +58,10 @@ export default function ClientsPage() {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
+  const [broker, setBroker] = useState("");
+  const [accountType, setAccountType] = useState<"demo" | "real">("demo");
+  const [accountNumber, setAccountNumber] = useState("");
+  const [brokerServer, setBrokerServer] = useState("");
   const [assignedAdmin, setAssignedAdmin] = useState("");
   const [expiry, setExpiry] = useState<Expiry>("30d");
   const [creating, setCreating] = useState(false);
@@ -93,7 +101,7 @@ export default function ClientsPage() {
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
-    if (!email.trim() || !phone.trim()) return;
+    if (!email.trim() || !phone.trim() || !broker.trim() || !accountNumber.trim() || !brokerServer.trim()) return;
     setCreating(true);
     setNotice(null);
     try {
@@ -106,6 +114,10 @@ export default function ClientsPage() {
           client_phone: phone.trim(),
           assigned_admin: assignedAdmin || undefined,
           expiry,
+          broker: broker.trim(),
+          account_type: accountType,
+          account_number: accountNumber.trim(),
+          broker_server: brokerServer.trim(),
         }),
       });
       const json = await res.json();
@@ -116,6 +128,10 @@ export default function ClientsPage() {
       setName("");
       setEmail("");
       setPhone("");
+      setBroker("");
+      setAccountType("demo");
+      setAccountNumber("");
+      setBrokerServer("");
       setAssignedAdmin("");
       setRevealed((prev) => new Set(prev).add(json.client.id));
       setNotice("Cliente creado. Su token ya está visible abajo — cópialo o compártelo por correo.");
@@ -261,6 +277,43 @@ export default function ClientsPage() {
             style={{ minWidth: 150 }}
             required
           />
+          <input
+            type="text"
+            value={broker}
+            onChange={(e) => setBroker(e.target.value)}
+            placeholder="Bróker (ej. Tradeview)"
+            className={styles.settingsInput}
+            style={{ minWidth: 160 }}
+            required
+          />
+          <select
+            value={accountType}
+            onChange={(e) => setAccountType(e.target.value as "demo" | "real")}
+            className={styles.settingsInput}
+            style={accountType === "real" ? { color: "var(--red)", fontWeight: 700 } : undefined}
+            required
+          >
+            <option value="demo">Cuenta Demo</option>
+            <option value="real">Cuenta Real</option>
+          </select>
+          <input
+            type="text"
+            value={accountNumber}
+            onChange={(e) => setAccountNumber(e.target.value)}
+            placeholder="N° de cuenta"
+            className={styles.settingsInput}
+            style={{ minWidth: 130 }}
+            required
+          />
+          <input
+            type="text"
+            value={brokerServer}
+            onChange={(e) => setBrokerServer(e.target.value)}
+            placeholder="Servidor (ej. Tradeview-Demo)"
+            className={styles.settingsInput}
+            style={{ minWidth: 180 }}
+            required
+          />
           <select
             value={assignedAdmin}
             onChange={(e) => setAssignedAdmin(e.target.value)}
@@ -296,6 +349,7 @@ export default function ClientsPage() {
           <thead>
             <tr>
               <th>Cliente</th>
+              <th>Cuenta</th>
               {isSuper && <th>Admin</th>}
               <th>Token</th>
               <th>Caducidad</th>
@@ -320,6 +374,25 @@ export default function ClientsPage() {
                     >
                       {c.client_phone}
                     </a>
+                  </div>
+                </td>
+                <td>
+                  <div>
+                    {c.broker === "SIN_DATO" ? (
+                      <span className={`${styles.badge} ${styles.badge_warning}`}>SIN DATO</span>
+                    ) : (
+                      <>
+                        {c.broker}{" "}
+                        <span
+                          className={`${styles.badge} ${c.account_type === "real" ? styles.badge_critical : styles.badge_neutral}`}
+                        >
+                          {c.account_type === "real" ? "REAL" : "DEMO"}
+                        </span>
+                      </>
+                    )}
+                  </div>
+                  <div className={styles.hint} style={{ margin: 0 }}>
+                    {c.account_number} · {c.broker_server}
                   </div>
                 </td>
                 {isSuper && <td>{c.assigned_admin_email ?? "—"}</td>}
@@ -377,7 +450,7 @@ export default function ClientsPage() {
             ))}
             {clients && clients.length === 0 && (
               <tr>
-                <td colSpan={isSuper ? 7 : 6} className={styles.emptyRow}>
+                <td colSpan={isSuper ? 8 : 7} className={styles.emptyRow}>
                   {isSuper ? "Sin clientes todavía" : "Aún no tienes clientes asignados"}
                 </td>
               </tr>

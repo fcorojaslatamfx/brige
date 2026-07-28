@@ -64,6 +64,8 @@ type StatusResponse = {
   ok: true;
   settings: Settings;
   origin: OriginFilter;
+  broker: string;
+  brokers: string[];
   pending_count: number;
   recent_signals: SignalRow[];
   recent_audit: AuditRow[];
@@ -89,10 +91,11 @@ export default function StatusPage() {
   const [savingSettings, setSavingSettings] = useState(false);
   const [form, setForm] = useState<SettingsForm>({});
   const [origin, setOrigin] = useState<OriginFilter>("tradingview");
+  const [broker, setBroker] = useState<string>("all");
 
   const fetchStatus = useCallback(async () => {
     try {
-      const res = await fetch(`/api/status?origin=${origin}`, { cache: "no-store" });
+      const res = await fetch(`/api/status?origin=${origin}&broker=${encodeURIComponent(broker)}`, { cache: "no-store" });
       if (res.status === 401) {
         router.push("/login");
         return;
@@ -113,7 +116,7 @@ export default function StatusPage() {
     } catch {
       setError("No se pudo contactar al bridge.");
     }
-  }, [router, origin]);
+  }, [router, origin, broker]);
 
   useEffect(() => {
     fetchStatus();
@@ -207,6 +210,24 @@ export default function StatusPage() {
             ))}
           </div>
           {origin !== "tradingview" && <Badge tone="warning">VIENDO TRÁFICO NO-PRODUCCIÓN</Badge>}
+        </div>
+
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginTop: 10 }}>
+          <span className={styles.statLabel}>Bróker</span>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {(["all", ...(data?.brokers ?? [])] as string[]).map((b) => (
+              <button
+                key={b}
+                type="button"
+                onClick={() => setBroker(b)}
+                className={styles.gateButton}
+                style={{ opacity: broker === b ? 1 : 0.5, textTransform: "none" }}
+              >
+                {b === "all" ? "todos" : b}
+              </button>
+            ))}
+          </div>
+          {broker !== "all" && <Badge tone="purple">SEÑALES ENTREGADAS A {broker.toUpperCase()}</Badge>}
         </div>
       </section>
 
