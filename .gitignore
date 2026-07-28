@@ -143,3 +143,8 @@ vite.config.ts.timestamp-*
 .vite/
 .vercel
 .env*
+
+# Snapshot local de contexto para sesiones de Claude — copias de README.md,
+# MEMORIA_PROYECTO.md y el metaprompt que ya viven versionados en el repo.
+# Se desincroniza apenas se edita el original; no versionar.
+claude-project-context/
