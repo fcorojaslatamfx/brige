@@ -16,7 +16,7 @@ Vercel despliega preview por rama y producción desde `main`.
 
 ## [Sin liberar]
 
-### EA v2.0 + supresión de setups efímeros · sin commit · 29-jul-2026
+### EA v2.0 + supresión de setups efímeros · `5744b14` · 29-jul-2026
 
 Investigación de tres preguntas del operador: (1) los setups del indicador no se
 reflejan en MT4, (2) tampoco el `BUY LIMIT` / `SELL LIMIT`, (3) las señales que
