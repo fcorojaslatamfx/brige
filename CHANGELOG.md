@@ -14,7 +14,83 @@ Vercel despliega preview por rama y producción desde `main`.
 
 ---
 
-## [Sin liberar] — rama `feature/broker-cuenta-cliente`
+## [Sin liberar]
+
+### EA v2.0 + supresión de setups efímeros · `5744b14` · 29-jul-2026
+
+Investigación de tres preguntas del operador: (1) los setups del indicador no se
+reflejan en MT4, (2) tampoco el `BUY LIMIT` / `SELL LIMIT`, (3) las señales que
+se cancelan en un rango corto de tiempo no deberían ser visibles en MT4.
+
+**Causa de (1): no existen. Nada las emite.** Verificado contra producción:
+`select count(*) from signals where action like 'SETUP%'` → **0** en todo el
+histórico; ningún payload trae `schema` ni `bar_time`; `ts_signal = bar_time` =
+apertura exacta de vela → el indicador vivo sigue siendo el Pine v1.x. La cadena
+del bridge estaba completa desde la migración 008 y sin nada que transportar. El
+pendiente, con los bloques de Pine y el orden de despliegue, quedó en
+`docs/PENDIENTE_PINE_v2.md` (no se puede resolver desde este repo).
+
+**Causa de (2): el dato llega y el EA lo tiraba.** Las 513 entradas del histórico
+(263 `BUY_DUAL` + 250 `SELL_DUAL`) traen `type='LIMIT'`, sin una sola excepción. `HandleEntrySignal()` del EA v1.0 leía `action`, lo
+traducía a `"BUY"`/`"SELL"` y nunca leía `type`. Defecto de presentación en el
+consumidor, no de transporte.
+
+**(3) es preventivo, no correctivo.** Hoy el caso es imposible de observar: el
+mínimo entre una entrada y una cancelación posterior del mismo símbolo es de
+**11.699 s (3 h 15 min)** y la mediana de 21 h, porque `CANCEL_ALL` se evalúa por
+conteo de barras. Cero cancelaciones dentro de 300 s en todo el histórico. Se
+vuelve real en cuanto Pine emita `SETUP_*`, que sí pueden armarse y desarmarse
+intrabarra.
+
+- `mt4/PessaroBridgeEA_v2.mq4` (nuevo, reemplaza al v1.0):
+  - **R1** lee `type` → `BUY LIMIT` / `SELL LIMIT` / `BUY STOP` / … en panel,
+    alerta y push.
+  - **R2** procesa `SETUP_BUY` / `SETUP_SELL` / `SETUP_CANCEL`, con `◇` armado vs
+    `◆` disparo. El v1.0 los ignoraba con un `Print` **y sin ackear**, así que la
+    señal se quedaba `claimed` hasta morir `expired`: en `/status` era
+    indistinguible de un terminal apagado. Ahora incluso una acción desconocida
+    se ackea como `error`.
+  - **R3** lee el `thresholds` anidado con fallback al plano v1, vía un
+    `JsonHasKey()` que distingue presencia de valor: sin datos escribe `s/d`,
+    nunca `0/0`.
+  - **R4** cuarentena por `is_test` / `env` / `origin` / `account_id`: no suena,
+    no vibra, se cuenta aparte y se ackea con el motivo.
+  - **R5** `online` con tolerancia `intervalo × 2 + 5`. El umbral fijo de 10 s
+    del v1.0 marcaba OFFLINE el 66 % del tiempo con el puente sano, porque fuera
+    de ventana el polling es de 30 s.
+  - **R6** cadencia con `GetTickCount()`: `TimeCurrent()` es la hora del último
+    tick recibido y no avanza en un símbolo que no cotiza, así que en un gráfico
+    tranquilo el polling del v1.0 se congelaba.
+  - **R7/R8** panel con identidad Pessaro, gauges de cupo, contadores de sesión,
+    `grade` con `★` e `impulse_atr`. El panel ya no se borra y recrea entero cada
+    segundo (parpadeo): reutiliza etiquetas y solo purga el excedente.
+  - Sondeo de sufijos de símbolo (`m`, `.r`, `_i`, `micro`…) antes de rendirse.
+- `supabase/migrations/016_ephemeral_setup_suppression.sql` (nuevo):
+  `settings.setup_hold_seconds` (default 45, CHECK `< queue_ttl_seconds`), estado
+  `suppressed`, `signals.superseded_by`, `signal_dispatched()` y
+  `suppress_ephemeral_setups()`. Los tres claims (operador, prueba, clientes)
+  suprimen antes de expirar por TTL y retienen los `SETUP_*`; `calc_thresholds()`
+  y `today_counts()` dejan de contar lo suprimido.
+  - La retención **solo** aplica a `SETUP_BUY`/`SETUP_SELL`. Un disparo significa
+    "el precio ya tocó tu nivel" y no se retrasa ni un segundo; sí se suprime si
+    su cancelación llega mientras sigue en cola (latencia cero añadida).
+  - **Guardarraíl duro:** la cancelación solo se suprime si no queda ninguna
+    entrada despachada y sin cerrar de ese símbolo. "Despachada" mira
+    `claimed_at` **y** `client_deliveries` — los EA de cliente reciben por
+    difusión sin tocar `signals.status`, así que usar el status habría dejado a
+    los clientes con órdenes pendientes cuya cancelación se suprimió.
+  - Orden obligatorio en el claim: suprimir → expirar por TTL → seleccionar. Al
+    revés, un armado ya caducado deja de ser `pending` y su cancelación se
+    entrega huérfana, que es el ruido que veníamos a eliminar.
+- `lib/schema.ts` / `lib/counts.ts` / `app/status/page.tsx`: `setup_hold_seconds`
+  editable en caliente, estado `SUPRIMIDA`, `superseded_by`.
+- `app/api/settings/route.ts`: el CHECK `setup_hold_seconds < queue_ttl_seconds`
+  se traduce a un 400 legible en vez de un 500 opaco.
+- Tests: 5 de integración sobre la cola de prueba (pareja efímera suprimida,
+  retención que bloquea, retención agotada que entrega, guardarraíl de la
+  cancelación de un armado ya despachado, disparo no retenido) + 3 puros. La
+  ventana se pasa explícita por `p_hold_seconds` para no mutar la configuración
+  de producción mientras la suite corre.
 
 ### Guardarraíles de rol en la invitación + rescate por CLI · `507fa62` · 27-jul-2026
 

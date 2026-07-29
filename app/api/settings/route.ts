@@ -43,6 +43,20 @@ export async function PUT(req: NextRequest) {
     .single();
 
   if (error) {
+    // La retención de armados tiene que caber dentro del TTL de cola o nada se
+    // entregaría nunca (el armado moriría 'expired' esperando salir). Lo impone
+    // un CHECK de la tabla; sin este mapeo el panel mostraría un 500 opaco.
+    if (error.code === "23514" && error.message.includes("setup_hold")) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: `La retención de armados debe ser menor que el TTL de cola (${
+            parsed.data.queue_ttl_seconds ?? before.queue_ttl_seconds
+          }s).`,
+        },
+        { status: 400 },
+      );
+    }
     return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
   }
 
