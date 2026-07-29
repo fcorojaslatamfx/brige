@@ -117,6 +117,10 @@ export const settingsUpdateSchema = z
     global_threshold: z.number().int().positive(),
     freshness_seconds: z.number().int().positive(),
     queue_ttl_seconds: z.number().int().positive(),
+    // Retención de armados (migración 016). Admite 0 = desactivada, así que
+    // es nonnegative y no positive. El tope contra queue_ttl_seconds lo impone
+    // el CHECK de la tabla: aquí no se conoce el TTL vigente.
+    setup_hold_seconds: z.number().int().nonnegative(),
   })
   .partial()
   .refine((v) => Object.keys(v).length > 0, { message: "Debe incluir al menos un campo" });

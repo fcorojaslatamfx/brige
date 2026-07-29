@@ -9,6 +9,8 @@ export type SettingsRow = {
   global_threshold: number;
   freshness_seconds: number;
   queue_ttl_seconds: number;
+  /** Retención de SETUP_BUY/SETUP_SELL antes de ser entregables (migración 016). 0 = desactivada. */
+  setup_hold_seconds: number;
   updated_at: string;
   updated_by: string | null;
 };
@@ -44,9 +46,13 @@ export type SignalRow = {
   origin: SignalOrigin;
   is_test: boolean;
   env: string;
-  status: "pending" | "claimed" | "notified" | "rejected_technical" | "expired" | "error";
+  // 'suppressed': armado y cancelación resueltos dentro de setup_hold_seconds.
+  // Nunca salió al terminal, y es deliberado (migración 016).
+  status: "pending" | "claimed" | "notified" | "rejected_technical" | "expired" | "error" | "suppressed";
   error: string | null;
   duplicate_of: string | null;
+  /** La cancelación que suprimió este armado (o el armado que dejó sin objeto a la cancelación). */
+  superseded_by: string | null;
   claimed_at: string | null;
   notified_at: string | null;
   created_at: string;

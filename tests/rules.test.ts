@@ -36,6 +36,10 @@ const SYM_CLAIM = `${TEST_PREFIX}_CLAIM`;
 const SYM_ACK = `${TEST_PREFIX}_ACK`;
 const SYM_LEAK = `${TEST_PREFIX}_LEAK`;
 const SYM_BROADCAST = `${TEST_PREFIX}_BCAST`;
+const SYM_EPHEMERAL = `${TEST_PREFIX}_EPH`;
+const SYM_HOLD = `${TEST_PREFIX}_HOLD`;
+const SYM_NOHOLD = `${TEST_PREFIX}_NOHOLD`;
+const SYM_GUARD = `${TEST_PREFIX}_GUARD`;
 
 function httpRequest(path: string, init?: ConstructorParameters<typeof NextRequest>[1]) {
   return new NextRequest(new URL(path, BASE), init);
@@ -64,6 +68,36 @@ function entryPayload(symbol: string, overrides: Record<string, unknown> = {}) {
     partial_2: { lots: 0.01, tp: 120 },
     risk_usd: 50,
     timestamp: Date.now(),
+    ...overrides,
+  };
+}
+
+/**
+ * Armado (SETUP_BUY/SETUP_SELL): mismo shape que una entrada.
+ *
+ * `bar_time` se pasa explícito y distinto en cada llamada porque el índice de
+ * dedup es (symbol, action, bar_time): dos armados del mismo símbolo en un
+ * test necesitan velas distintas o el segundo entra como duplicado.
+ */
+function setupPayload(symbol: string, action: "SETUP_BUY" | "SETUP_SELL", overrides: Record<string, unknown> = {}) {
+  const now = Date.now();
+  return entryPayload(symbol, { action, bar_time: now, timestamp: now, schema: "2.0", ...overrides });
+}
+
+function cancelPayload(
+  symbol: string,
+  action: "SETUP_CANCEL" | "CANCEL_ALL" = "SETUP_CANCEL",
+  overrides: Record<string, unknown> = {},
+) {
+  const now = Date.now();
+  return {
+    account_id: "TD_CONF_LON_NY",
+    action,
+    symbol,
+    tf: "15",
+    bar_time: now,
+    timestamp: now,
+    schema: "2.0",
     ...overrides,
   };
 }
@@ -174,6 +208,13 @@ describe("lib/schema · ack y settings", () => {
   it("settingsUpdateSchema exige al menos un campo", () => {
     expect(settingsUpdateSchema.safeParse({}).success).toBe(false);
     expect(settingsUpdateSchema.safeParse({ symbol_threshold: 5 }).success).toBe(true);
+  });
+
+  it("setup_hold_seconds acepta 0 (retención desactivada) y rechaza negativos", () => {
+    expect(settingsUpdateSchema.safeParse({ setup_hold_seconds: 0 }).success).toBe(true);
+    expect(settingsUpdateSchema.safeParse({ setup_hold_seconds: 45 }).success).toBe(true);
+    expect(settingsUpdateSchema.safeParse({ setup_hold_seconds: -1 }).success).toBe(false);
+    expect(settingsUpdateSchema.safeParse({ setup_hold_seconds: 2.5 }).success).toBe(false);
   });
 });
 
@@ -309,6 +350,7 @@ describe("lib/counts · toEaPayload sobreescribe con conteos autoritativos", () 
     status: "pending",
     error: null,
     duplicate_of: null,
+    superseded_by: null,
     claimed_at: null,
     notified_at: null,
     created_at: new Date().toISOString(),
@@ -361,6 +403,15 @@ describe("lib/counts · toEaPayload sobreescribe con conteos autoritativos", () 
     expect(payload.env).toBe("production");
     expect(payload.origin).toBe("tradingview");
     expect(payload.bar_time).toBe(1_700_000_000_000);
+  });
+
+  it("la contabilidad interna (status/superseded_by/duplicate_of) NO viaja al EA", () => {
+    // El EA no debe poder tomar decisiones con el estado de la cola: qué se
+    // entrega y qué se suprime lo decide el bridge (migración 016).
+    const payload = toEaPayload({ ...baseRow, superseded_by: "otra-uuid" }) as Record<string, unknown>;
+    expect(payload).not.toHaveProperty("superseded_by");
+    expect(payload).not.toHaveProperty("status");
+    expect(payload).not.toHaveProperty("duplicate_of");
   });
 });
 
@@ -552,6 +603,10 @@ describe.skipIf(!hasLiveCreds)("reglas de negocio (integración contra Supabase 
     expect(body.reason).toBe("stale");
   });
 
+  // Timeout propio: este test emite `symbol_threshold` señales EN SERIE, y ese
+  // valor es configurable en caliente. En producción está en 10, así que son 10
+  // ingestas completas (~6 viajes de red cada una) y con el timeout global de
+  // 20 s se agota por latencia, no por lógica.
   it("al ALCANZAR el umbral por símbolo la señal SE ENTREGA con threshold_exceeded=true — nada se suprime", async () => {
     // Independiente del valor configurado en settings: se emiten exactamente
     // `symbol_threshold` señales y se comprueba que la última (que ALCANZA el
@@ -569,7 +624,7 @@ describe.skipIf(!hasLiveCreds)("reglas de negocio (integración contra Supabase 
     }
     expect(last.auth_symbol_count).toBe(threshold);
     expect(last.auth_threshold_exceeded).toBe(true);
-  });
+  }, 90_000);
 
   it("claim atómico: GET /api/signals no entrega la misma señal dos veces", async () => {
     await webhookPOST(jsonRequest(`/api/webhook?token=${TV_TOKEN}`, entryPayload(SYM_CLAIM)));
@@ -638,5 +693,106 @@ describe.skipIf(!hasLiveCreds)("reglas de negocio (integración contra Supabase 
 
     const secondAck = await ackPOST(jsonRequest(`/api/ack?token=${EA_TOKEN}`, { id, status: "notified" }));
     expect((await secondAck.json()).ok).toBe(true); // no-op idempotente, no revienta
+  });
+
+  // ---------- Migración 016 · retención y supresión de setups efímeros ----------
+  // La ventana de retención se pasa EXPLÍCITA en cada claim (p_hold_seconds) en
+  // vez de tocar `settings`: mutar la configuración global —aunque sea por dos
+  // segundos— cambiaría el comportamiento del bridge real mientras la suite
+  // corre. La cola de prueba existe justo para esto (§8 capa 2).
+  const HOLD_LARGO = 3600;
+
+  /**
+   * Ingesta que exige quedar ENCOLADA.
+   *
+   * No basta con que la respuesta traiga `id`: una señal rechazada por stale o
+   * por duplicado también trae el suyo (queda como fila visible en /status). Si
+   * el helper solo mirara `id`, un rechazo se colaría como "ingestada" y el test
+   * fallaría después, en el claim, con un mensaje que no dice nada.
+   */
+  async function ingest(payload: unknown): Promise<string> {
+    const res = await webhookPOST(jsonRequest(`/api/webhook?token=${TV_TOKEN}`, payload));
+    const body = await res.json();
+    if (body.ok !== true) throw new Error(`ingesta NO encolada: ${JSON.stringify(body)}`);
+    return body.id as string;
+  }
+
+  /** Drena la cola de prueba con una retención dada y devuelve los ids entregados. */
+  async function claimTestQueue(holdSeconds: number, max = 200): Promise<Set<string>> {
+    const { data, error } = await supabase.rpc("claim_signals_test", {
+      p_max: max,
+      p_hold_seconds: holdSeconds,
+    });
+    if (error) throw error;
+    return new Set(((data ?? []) as { id: string }[]).map((r) => r.id));
+  }
+
+  async function rowOf(id: string) {
+    const { data } = await supabase.from("signals").select("status, superseded_by").eq("id", id).single();
+    return data as { status: string; superseded_by: string | null };
+  }
+
+  it("§016 CRÍTICO: armado + cancelación dentro de la ventana → ninguno llega al terminal", async () => {
+    const setupId = await ingest(setupPayload(SYM_EPHEMERAL, "SETUP_BUY"));
+    const cancelId = await ingest(cancelPayload(SYM_EPHEMERAL));
+
+    const entregadas = await claimTestQueue(HOLD_LARGO);
+
+    expect(entregadas.has(setupId)).toBe(false);
+    expect(entregadas.has(cancelId)).toBe(false);
+
+    const setup = await rowOf(setupId);
+    const cancel = await rowOf(cancelId);
+    expect(setup.status).toBe("suppressed");
+    expect(cancel.status).toBe("suppressed");
+    // Cada mitad de la pareja apunta a la otra: la traza queda en la fila.
+    expect(setup.superseded_by).toBe(cancelId);
+    expect(cancel.superseded_by).toBe(setupId);
+  });
+
+  it("§016: un armado sin cancelación NO sale mientras dure la retención…", async () => {
+    const setupId = await ingest(setupPayload(SYM_HOLD, "SETUP_SELL"));
+
+    const entregadas = await claimTestQueue(HOLD_LARGO);
+
+    expect(entregadas.has(setupId)).toBe(false);
+    expect((await rowOf(setupId)).status).toBe("pending"); // retenido, NO suprimido
+  });
+
+  it("§016: …y sí sale en cuanto la retención se agota (hold=0)", async () => {
+    const setupId = await ingest(setupPayload(SYM_NOHOLD, "SETUP_BUY"));
+
+    const entregadas = await claimTestQueue(0);
+
+    expect(entregadas.has(setupId)).toBe(true);
+    expect((await rowOf(setupId)).status).toBe("claimed");
+  });
+
+  it("§016 GUARDARRAÍL: la cancelación de un armado YA despachado se entrega siempre", async () => {
+    // 1) Armado que sí sale al terminal.
+    const armadoVisto = await ingest(setupPayload(SYM_GUARD, "SETUP_BUY", { bar_time: Date.now() - 60_000 }));
+    expect((await claimTestQueue(0)).has(armadoVisto)).toBe(true);
+
+    // 2) Segundo armado recién llegado + su cancelación inmediata.
+    const armadoEfimero = await ingest(setupPayload(SYM_GUARD, "SETUP_BUY", { bar_time: Date.now() }));
+    const cancelId = await ingest(cancelPayload(SYM_GUARD));
+
+    const entregadas = await claimTestQueue(HOLD_LARGO);
+
+    // El armado efímero se suprime…
+    expect(entregadas.has(armadoEfimero)).toBe(false);
+    expect((await rowOf(armadoEfimero)).status).toBe("suppressed");
+    // …pero la cancelación SALE: el trader tiene una pendiente colocada por
+    // indicación nuestra y nadie puede ocultarle que hay que retirarla.
+    expect(entregadas.has(cancelId)).toBe(true);
+    expect((await rowOf(cancelId)).status).toBe("claimed");
+  });
+
+  it("§016: un DISPARO (BUY_DUAL) nunca se retiene — el precio ya tocó el nivel", async () => {
+    const id = await ingest(entryPayload(`${TEST_PREFIX}_TRIG`, { timestamp: Date.now() }));
+
+    const entregadas = await claimTestQueue(HOLD_LARGO);
+
+    expect(entregadas.has(id)).toBe(true);
   });
 });

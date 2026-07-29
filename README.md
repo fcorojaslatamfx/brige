@@ -41,6 +41,8 @@ Cada señal trae, sobrescritos por Supabase, `current_symbol_count`, `current_gl
 
 **Contrato v2.0:** `ts_signal` (`timenow` de Pine) mide **frescura** y `bar_time` (`time` de la vela) sirve para **dedup** — antes un solo timestamp cumplía ambos fines y se pisaban entre sí. `bar_time` es opcional con fallback mientras Pine v1.x siga vivo. Acciones soportadas: `BUY`/`SELL`/`CANCEL` y `SETUP_BUY`/`SETUP_SELL`/`SETUP_CANCEL`.
 
+**Retención de armados (`setup_hold_seconds`, por defecto 45 s).** Un `SETUP_BUY`/`SETUP_SELL` espera esa ventana antes de ser entregable. Si dentro de ella llega su cancelación, la pareja pasa a `status='suppressed'` y **no llega al terminal**: un setup que se arma y se desarma en segundos nunca tuvo una pendiente colocable, así que notificarlo es solo ruido (dos alertas, dos push y dos filas de panel para un evento que no existió). Los **disparos** (`BUY_DUAL`/`SELL_DUAL`) significan "el precio ya tocó tu nivel" y **nunca se retienen**, aunque sí se suprimen si su cancelación llega mientras siguen en cola. Guardarraíl duro: la cancelación solo se suprime si no queda ninguna entrada **ya despachada y sin cerrar** de ese símbolo — si el trader tiene una pendiente colocada por indicación nuestra, su cancelación se entrega siempre. "Despachada" cuenta tanto la cola del operador (`claimed_at`) como la difusión a clientes (`client_deliveries`). Editable en caliente desde `/status`; `0` desactiva la retención y con ella la supresión.
+
 **Aislamiento del tráfico de prueba (3 capas):** en DB (`origin` / `is_test` / `env` con CHECK de coherencia, vista `signals_deliverable`, `claim_signals` solo producción), en el bridge (`lib/origin.ts` deriva el origen del token + `PESSARO_ENV`; la cola de prueba `claim_signals_test` solo se alcanza con token operator vía `?include_test=true`) y en el EA (externo). Cualquier `PESSARO_ENV` distinto de `production` marca **todo** el tráfico entrante como de prueba y lo excluye de la cola del EA — por eso los previews de Vercel deben tenerlo seteado.
 
 ## Stack tecnológico
@@ -86,7 +88,8 @@ Cada señal trae, sobrescritos por Supabase, `current_symbol_count`, `current_gl
 | `lib/pessaro-logo.ts` | Logo de Pessaro Capital embebido en base64 para `/login`. |
 | `lib/auth.ts` | Gate dual (sesión con rol vigente u `OPERATOR_TOKEN`) para `/api/status` y `/api/settings`. |
 | `lib/counts.ts` | Lógica de conteo autoritativo por símbolo/global. |
-| `mt4/PessaroBridgeEA.mq4` | Expert Advisor MQL4 — notificador, sin `OrderSend`. |
+| `mt4/PessaroBridgeEA_v2.mq4` | **Expert Advisor vigente** (contrato v2.0) — notificador, sin `OrderSend`. |
+| `mt4/PessaroBridgeEA.mq4` | EA v1.0, superado por el v2.0. Se conserva solo como referencia histórica. |
 | `supabase/migrations/` | Esquema SQL — **aplicar en orden**, ver más abajo. |
 | `scripts/` | `create-admin-user.ts` y `backfill-tokens.ts` (setup inicial), `set-user-role.ts` (rescate de roles). |
 | `tests/` | Suite Vitest (`rules.test.ts`) y simulador manual (`send-test-signal.ts`). |
@@ -150,6 +153,7 @@ Migraciones SQL en `supabase/migrations/`, **aplicar en orden `001` → `015`**.
 | `013_lockdown_calc_thresholds.sql` | Cierra una regresión: `calc_thresholds` (SECURITY DEFINER) quedaba ejecutable por `anon` vía PostgREST → revocado a `service_role`. |
 | `014_client_tokens.sql` | `client_tokens` + `client_deliveries` + `claim_signals_for_client` (difusión). |
 | `015_client_broker_account.sql` | `client_tokens` gana `broker` / `account_type` (`demo`\|`real`) / `account_number` / `broker_server`, `NOT NULL` con backfill `'SIN_DATO'`. |
+| `016_ephemeral_setup_suppression.sql` | Retención de armados (`settings.setup_hold_seconds`), estado `suppressed` + `signals.superseded_by`, `suppress_ephemeral_setups()` y `signal_dispatched()`. Los tres claims retienen los `SETUP_*` y suprimen las parejas efímeras; lo suprimido no consume cupo diario. |
 
 En el dashboard de Supabase (Authentication → URL Configuration), el **Site URL** y los **Redirect URLs** deben apuntar al dominio real (`https://brige.pessaro.cl/set-password`), no a `localhost` — si quedan apuntando a localhost, los links de invitación/recuperación enviados por correo llevan a los usuarios a una URL inaccesible. Es config del dashboard de Supabase, no del código.
 
@@ -170,7 +174,7 @@ Se despliega en **Vercel** (`vercel.json` ya declara el cron diario a `/api/cron
 2. Deploy.
 3. Agregar el dominio `brige.pessaro.cl` en Vercel → Domains y crear el CNAME correspondiente en el DNS de `pessaro.cl`.
 4. Configurar la alerta de TradingView apuntando a `https://brige.pessaro.cl/api/webhook?token=<TV_WEBHOOK_TOKEN>`.
-5. Instalar y configurar `mt4/PessaroBridgeEA.mq4` en el terminal MT4 (compilar en MetaEditor, habilitar WebRequest hacia el dominio, configurar `InpEaToken`, `InpSymbolMap` y `InpBrokerToNyOffsetHours`).
+5. Instalar y configurar `mt4/PessaroBridgeEA_v2.mq4` en el terminal MT4 (compilar en MetaEditor, habilitar WebRequest hacia el dominio, configurar `InpEaToken`, `InpExpectedAccountId`, `InpSymbolMap` y `InpBrokerToNyOffsetHours`). Si el terminal tiene cargado el v1.0, quitarlo del gráfico antes: los dos EA polleando el mismo token se roban señales entre sí, porque la cola del operador es de consumo único.
 
 Los pasos detallados (whitelisting de WebRequest, cálculo del offset horario NY↔bróker con fechas de DST, checklist end-to-end, troubleshooting) están en `docs/metaprompt_pessaro_bridge_v3_despachador.md` — no se duplican aquí para no desincronizarse.
 
@@ -190,11 +194,15 @@ El bridge está **completo y en producción** (`brige.pessaro.cl`) en su modo de
 8. **Unificación UX con pessaro.cl:** `app/theme.css` como única fuente de tokens de marca, con jerarquía semántica de color (púrpura = navegación/CTA, dorado = premium y ELITE).
 9. **Datos de cuenta de broker por cliente + filtro por broker en `/status`** (migración 015).
 10. **Guardarraíles de rol en la invitación** + `scripts/set-user-role.ts` como rescate por CLI.
+11. **EA v2.0 + supresión de setups efímeros** (migración 016): el EA pasa a mostrar el tipo de orden (`BUY LIMIT`/`SELL LIMIT`), procesa y ackea los `SETUP_*`, lee el bloque `thresholds` anidado con fallback plano y escribe `s/d` en vez de `0/0`, pone en cuarentena el tráfico que no sea real, y corrige el estado ONLINE y el reloj de polling. En el bridge, las parejas armado+cancelación resueltas dentro de `setup_hold_seconds` ya no llegan al terminal.
 
 **Modelo de roles:** se comparó con `pessaro-crm` (repo hermano, 3 roles + tabla de perfil extendido `crm_staff_profiles`) y se decidió mantener el modelo simple en Bridge, que solo gestiona acceso al panel y no un CRM con múltiples módulos de equipo. El rol `cliente` que llegó después no contradice eso: no es un usuario del panel sino un destinatario de señales, y vive en `client_tokens`, no en `user_roles`.
 
 **Pendiente / a vigilar:**
-- **Piezas externas del meta-prompt v3.0**, que no viven en este repo: Pine v2.0 en TradingView, EA v2.0 en MT4 y la limpieza de alertas duplicadas. Hasta que Pine v2.0 esté vivo, `bar_time` sigue siendo opcional con fallback y se conserva el índice de dedup viejo junto al nuevo.
+- 🔴 **Pine v2.0 sigue sin publicarse en TradingView, y es la causa raíz de que no haya setups en MT4.** Verificado contra producción el 2026-07-29: `select count(*) from signals where action like 'SETUP%'` da **0** en todo el histórico, ningún payload trae `schema` ni `bar_time`, y `ts_signal = bar_time` (apertura de vela) en las señales más recientes → el indicador vivo es el v1.x. El bridge, la base y el EA v2.0 ya aceptan `SETUP_*`; **nada los emite**. Los pasos exactos están en `docs/PENDIENTE_PINE_v2.md`. Efecto colateral medido del mismo defecto (1-A): 149 señales rechazadas por `stale` y 215 por `duplicate`.
+- **Limpieza de alertas duplicadas en TradingView**: hay más de una alerta activa sobre el mismo indicador con "Any alert() function call", y el lote entero se reemite ~9 s después. Hoy lo tapa el índice de dedup; cuando entre Pine v2.0 dejará de taparlo (ver orden de despliegue en `007_bar_time.sql`).
+- Hasta que Pine v2.0 esté vivo, `bar_time` sigue siendo opcional con fallback y se conserva el índice de dedup viejo junto al nuevo.
+- **Cancelaciones huérfanas** (distinto de las parejas efímeras que ya suprime la migración 016): 43 `CANCEL_ALL` notificadas frente a 134 entradas muertas por `expired`, así que el operador recibe cancelaciones de operaciones que nunca se le notificaron por TTL o terminal apagado, no por ser efímeras. Suprimirlas también es una decisión operativa pendiente de tomar, no un bug.
 - Los links de recuperación entregados por email llegaron con el token ya invalidado (`otp_expired`) en 2 intentos vía Gmail, mientras que un link generado directo funcionó a la primera — sugiere que algo en el camino de entrega (Gmail y/o el proxy de Resend) pre-visita el link de un solo uso. No investigado a fondo; si se repite con invitaciones reales, considerar que el email lleve a una página propia con un botón a clickear en vez de un link GET directo al endpoint de Supabase.
 - **Cobertura de tests:** `tests/rules.test.ts` cubre el contrato y las reglas de señales; las barreras de autorización de las rutas de usuarios y clientes no tienen tests automatizados.
 
