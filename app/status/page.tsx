@@ -11,6 +11,7 @@ type Settings = {
   global_threshold: number;
   freshness_seconds: number;
   queue_ttl_seconds: number;
+  setup_hold_seconds: number;
   updated_at: string;
   updated_by: string | null;
 };
@@ -80,7 +81,12 @@ type StatusResponse = {
   latency_stats: LatencyRow[];
 };
 
-type SettingsForm = Partial<Pick<Settings, "symbol_threshold" | "global_threshold" | "freshness_seconds" | "queue_ttl_seconds">>;
+type SettingsForm = Partial<
+  Pick<
+    Settings,
+    "symbol_threshold" | "global_threshold" | "freshness_seconds" | "queue_ttl_seconds" | "setup_hold_seconds"
+  >
+>;
 
 const REFRESH_MS = 5000;
 
@@ -131,6 +137,7 @@ export default function StatusPage() {
         global_threshold: data.settings.global_threshold,
         freshness_seconds: data.settings.freshness_seconds,
         queue_ttl_seconds: data.settings.queue_ttl_seconds,
+        setup_hold_seconds: data.settings.setup_hold_seconds,
       });
     }
   }, [data?.settings]);
@@ -307,7 +314,17 @@ export default function StatusPage() {
             value={form.queue_ttl_seconds}
             onChange={(v) => setForm((f) => ({ ...f, queue_ttl_seconds: v }))}
           />
+          <SettingsField
+            label="Retención de armados (s)"
+            value={form.setup_hold_seconds}
+            onChange={(v) => setForm((f) => ({ ...f, setup_hold_seconds: v }))}
+          />
         </div>
+        <p className={styles.hint}>
+          Retención: un SETUP BUY/SELL espera esos segundos antes de salir al terminal. Si en ese lapso llega su
+          cancelación, la pareja se marca SUPRIMIDA y no suena en MT4. 0 desactiva la retención. Los disparos
+          (BUY/SELL) nunca se retienen. Tiene que ser menor que el TTL de cola.
+        </p>
         <button className={styles.saveButton} onClick={handleSaveSettings} disabled={savingSettings}>
           {savingSettings ? "Guardando…" : "Guardar umbrales"}
         </button>
@@ -474,6 +491,7 @@ function StatusBadge({ status }: { status: string }) {
     rejected_technical: { tone: "critical", label: "RECHAZADA" },
     expired: { tone: "warning", label: "EXPIRADA" },
     error: { tone: "critical", label: "ERROR" },
+    suppressed: { tone: "neutral", label: "SUPRIMIDA" },
   };
   const m = map[status] ?? { tone: "neutral", label: status.toUpperCase() };
   return <Badge tone={m.tone}>{m.label}</Badge>;

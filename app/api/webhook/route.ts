@@ -19,7 +19,7 @@ function resolveBarTime(payload: WebhookPayload): number {
   return payload.bar_time ?? payload.timestamp;
 }
 
-function toInsertRow(payload: WebhookPayload, ctx: IngestContext, nowMs: number) {
+function toInsertRow(payload: WebhookPayload, ctx: IngestContext) {
   const base = {
     raw: payload,
     account_id: payload.account_id,
@@ -31,7 +31,16 @@ function toInsertRow(payload: WebhookPayload, ctx: IngestContext, nowMs: number)
     origin: ctx.origin,
     is_test: ctx.is_test,
     env: ctx.env,
-    created_at: new Date(nowMs).toISOString(),
+    // `created_at` lo pone Postgres (default now()). Antes se escribía aquí con
+    // el reloj del proceso de la app, y eso metía DOS relojes en la misma
+    // columna: cualquier deriva entre el runtime y Postgres se volvía un desfase
+    // real. Se detectó midiendo la retención de armados (migración 016), que
+    // compara `now() - created_at`: con la máquina de desarrollo 20 s adelantada,
+    // un armado recién ingestado tenía created_at en el FUTURO para Postgres, la
+    // resta salía negativa y el armado quedaba retenido incluso con la ventana
+    // en 0. Con un solo reloj el invariante es trivial: created_at nunca está en
+    // el futuro. También sanea el lag de latency_stats / delivery_funnel, que
+    // comparan created_at contra ts_signal.
   };
 
   if (!isEntrySignal(payload)) {
@@ -130,7 +139,7 @@ export async function POST(req: NextRequest) {
   }
 
   const settings = await getSettings();
-  const row = toInsertRow(payload, ctx, nowMs);
+  const row = toInsertRow(payload, ctx);
   const barTime = resolveBarTime(payload);
 
   // Frescura: SIEMPRE contra timestamp (timenow), nunca contra bar_time (§5.1).
