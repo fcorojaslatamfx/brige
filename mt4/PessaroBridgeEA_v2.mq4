@@ -734,7 +734,15 @@ void CreateLabel(string name, string text, int x, int y, color clr, int fontSize
 
 // Las propiedades de OBJ_RECTANGLE_LABEL (XSIZE/YSIZE/BGCOLOR/BORDER_TYPE) son
 // de la API moderna: se fijan con ObjectSetInteger, no con el ObjectSet clásico.
-void CreateBackground(int x, int y, int w, int h)
+//
+// El fondo se crea ANTES que las etiquetas y se DIMENSIONA DESPUÉS, en dos
+// pasos. En MT4 los objetos del mismo plano se dibujan en orden de creación, así
+// que el rectángulo tiene que nacer primero o taparía el texto; pero su alto
+// real solo se conoce cuando ya se pintaron todas las filas, que son variables
+// (0 a InpPanelMaxRows) y además dependen de si hay datos de cupo. Calcularlo
+// por adelantado con una constante es justo lo que estaba mal: se quedaba ~80 px
+// corto y la franja inferior caía fuera del recuadro.
+void EnsureBackground(int x, int y, int w)
 {
    string name = PANEL_PREFIX + "bg";
    if(ObjectFind(name) < 0)
@@ -750,7 +758,11 @@ void CreateBackground(int x, int y, int w, int h)
    ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
    ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
    ObjectSetInteger(0, name, OBJPROP_XSIZE, w);
-   ObjectSetInteger(0, name, OBJPROP_YSIZE, h);
+}
+
+void SizeBackground(int height)
+{
+   ObjectSetInteger(0, PANEL_PREFIX + "bg", OBJPROP_YSIZE, height);
 }
 
 string Gauge(int count, int threshold, int width)
@@ -779,8 +791,8 @@ void DrawPanel()
 
    int x = InpPanelX, y = InpPanelY, lh = 15;
    int rows = ArraySize(g_rows);
-   int height = 200 + rows * lh;
-   CreateBackground(x - 6, y - 6, 780, height);
+   int yTop = y - 6;
+   EnsureBackground(x - 6, yTop, 780);
 
    // ---- Cabecera ----
    int since = SecondsSinceLastPoll();
@@ -876,6 +888,16 @@ void DrawPanel()
    CreateLabel(PANEL_PREFIX + "foot",
                "Este EA solo notifica · ◇ armado = pendiente colocable · ◆ disparo = el precio ya tocó el nivel",
                x, y + 4, InpColorGold, 7);
+
+   // Ahora sí se conoce el alto real: hasta la franja inferior más su margen.
+   SizeBackground((y + 4 + 12) - yTop + 6);
+
+   // Sin esto el panel queda congelado justo en el escenario que motivó el R6:
+   // MT4 repinta los objetos cuando llega un evento del gráfico, y en un símbolo
+   // que no cotiza (fin de semana, instrumento ilíquido, feriado del bróker) no
+   // llega ninguno. El polling avanzaría por GetTickCount() y el trader seguiría
+   // viendo el estado de hace horas, que es peor que verlo OFFLINE.
+   ChartRedraw();
 }
 
 string FormatRow(PanelRow &r)
