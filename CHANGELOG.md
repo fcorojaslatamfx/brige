@@ -16,6 +16,44 @@ Vercel despliega preview por rama y producción desde `main`.
 
 ## [Sin liberar]
 
+### Supresión de cancelaciones huérfanas · `9fed5e5` · 29-jul-2026
+
+Decisión del operador sobre el pendiente que había quedado abierto en la 016.
+Medido en producción: **43 `CANCEL_ALL` notificadas frente a 134 entradas
+muertas como `expired`**. El trader recibía cancelaciones de operaciones que
+nunca se le notificaron — no por efímeras (eso ya lo cubría la 016), sino porque
+el armado murió por TTL o con el terminal apagado. Es la queja original.
+
+- `supabase/migrations/018_orphan_cancel_suppression.sql` (nuevo, **aplicada**).
+  La regla: **una cancelación se entrega solo si existe una entrada de ese
+  símbolo que salió de verdad al terminal y que todavía no fue cerrada por una
+  cancelación ya entregada.** Sin nada vivo detrás no es información, es ruido.
+- **Generaliza el guardarraíl de la 016 en vez de añadir una regla nueva.** Allí
+  la cancelación se suprimía si (a) había matado un armado pendiente dentro de la
+  ventana Y (b) no quedaba una entrada despachada sin cerrar. Resulta que (b) por
+  sí solo era el predicado correcto; (a) solo restringía el caso a las parejas
+  efímeras. Al quitarlo, el mismo mecanismo cubre también las huérfanas.
+- **La ventana deja de intervenir en la supresión.** Las víctimas de una
+  cancelación pasan a ser TODAS las entradas del símbolo que sigan en cola y
+  nunca se hayan despachado, sin límite de tiempo: entregar un armado que una
+  cancelación posterior ya invalidó es el mismo ruido, dé igual cuánto pasó.
+  `setup_hold_seconds` sigue siendo necesaria pero su único trabajo ahora es
+  RETENER lo suficiente para que la cancelación alcance al armado. Por eso
+  `suppress_ephemeral_setups` pierde el parámetro `p_hold_seconds`.
+- **La cadena se cierra sola, sin ventana de tiempo arbitraria:** cuando una
+  cancelación se entrega, la entrada que la motivó queda cerrada, así que las
+  siguientes del mismo símbolo vuelven a ser huérfanas. Una entrada despachada y
+  jamás cancelada conserva su derecho a la cancelación por vieja que sea. Hay un
+  test que fija ese cierre.
+- `settings.suppress_orphan_cancels` (default `true`) con casilla en `/status`:
+  es un cambio en CUÁNDO le llega una cancelación al trader y merece
+  interruptor. Apagarlo revierte solo esto; el guardarraíl no se toca.
+- 57/57 tests (4 nuevos: huérfana pura, armado muerto en cola, guardarraíl con
+  entrada despachada, y segunda cancelación ya huérfana).
+- `scripts/send-test-emails.ts` (nuevo): manda correos de prueba reales a una
+  casilla para revisar el formato en Gmail/Outlook, no solo en el navegador.
+  Complementa a `preview-emails.ts`, que no envía nada.
+
 ### Revisión estática del EA v2.0: alto del panel y repintado · `91a074a` · 29-jul-2026
 
 El EA v2.0 se entregó sin haber pasado nunca por un compilador (no hay MetaEditor

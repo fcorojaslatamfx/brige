@@ -11,6 +11,8 @@ export type SettingsRow = {
   queue_ttl_seconds: number;
   /** Retención de SETUP_BUY/SETUP_SELL antes de ser entregables (migración 016). 0 = desactivada. */
   setup_hold_seconds: number;
+  /** Suprimir cancelaciones sin ninguna entrada despachada y sin cerrar detrás (migración 018). */
+  suppress_orphan_cancels: boolean;
   updated_at: string;
   updated_by: string | null;
 };
