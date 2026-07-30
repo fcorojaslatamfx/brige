@@ -3,7 +3,8 @@ import { supabase } from "@/lib/supabase";
 import { getAuthenticatedUser } from "@/lib/auth";
 import { countSuperAdmins, createOrGetAuthUser, getUserRole, upsertUserRole, generateRecoveryLink } from "@/lib/users";
 import { sendInviteEmail } from "@/lib/email";
-import { inviteUserSchema } from "@/lib/schema";
+import { onboardClient } from "@/lib/client-onboarding";
+import { inviteSchema } from "@/lib/schema";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -24,10 +25,38 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: false, error: "malformed json" }, { status: 400 });
   }
 
-  const parsed = inviteUserSchema.safeParse(body);
+  const parsed = inviteSchema.safeParse(body);
   if (!parsed.success) {
     return NextResponse.json({ ok: false, error: "invalid payload", issues: parsed.error.issues }, { status: 400 });
   }
+
+  // Rol "cliente": NO es un usuario del panel. No se crea cuenta en Supabase
+  // Auth, no se toca `user_roles` y no se manda link de contraseña — el cliente
+  // no inicia sesión, se identifica con su token en el EA. Comparte formulario
+  // con la invitación de administradores solo porque para el operador es el
+  // mismo gesto; por debajo es el flujo de client_tokens.
+  if (parsed.data.role === "cliente") {
+    const { role: _role, email: clientEmail, ...perfil } = parsed.data;
+    void _role;
+
+    let result;
+    try {
+      result = await onboardClient(
+        { ...perfil, client_email: clientEmail },
+        { id: caller.id, email: caller.email ?? null },
+      );
+    } catch (e) {
+      return NextResponse.json({ ok: false, error: e instanceof Error ? e.message : "error" }, { status: 500 });
+    }
+
+    return NextResponse.json({
+      ok: true,
+      kind: "cliente",
+      client_id: result.client.id,
+      email_warning: result.emailWarning,
+    });
+  }
+
   const { email, role } = parsed.data;
 
   let userId: string;
@@ -74,5 +103,5 @@ export async function POST(req: NextRequest) {
     detail: { email, role, invited_by: caller.email ?? caller.id, is_existing: isExisting },
   });
 
-  return NextResponse.json({ ok: true, user_id: userId, is_existing: isExisting, resend_id: resendId });
+  return NextResponse.json({ ok: true, kind: "usuario", user_id: userId, is_existing: isExisting, resend_id: resendId });
 }

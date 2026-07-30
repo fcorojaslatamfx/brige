@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { supabase } from "@/lib/supabase";
 import { getAuthenticatedUser } from "@/lib/auth";
-import { createClientToken, listClientTokens } from "@/lib/clients";
+import { listClientTokens } from "@/lib/clients";
+import { onboardClient } from "@/lib/client-onboarding";
 import { listUsersWithRoles } from "@/lib/users";
 import { createClientSchema } from "@/lib/schema";
 
@@ -45,28 +45,15 @@ export async function POST(req: NextRequest) {
   if (!parsed.success) {
     return NextResponse.json({ ok: false, error: "invalid payload", issues: parsed.error.issues }, { status: 400 });
   }
-  const input = parsed.data;
-
-  let created;
+  // El alta, el correo al cliente y el aviso a los super_admin viven juntos en
+  // lib/client-onboarding para que este camino y el de /api/users/invite con
+  // role="cliente" no puedan divergir.
+  let result;
   try {
-    created = await createClientToken({ ...input, created_by: caller.id });
+    result = await onboardClient(parsed.data, { id: caller.id, email: caller.email ?? null });
   } catch (e) {
     return NextResponse.json({ ok: false, error: e instanceof Error ? e.message : "error" }, { status: 500 });
   }
 
-  await supabase.from("audit").insert({
-    signal_id: null,
-    event_type: "client_token_created",
-    detail: {
-      client_id: created.id,
-      client_email: created.client_email,
-      broker: created.broker,
-      account_type: created.account_type,
-      expiry: input.expiry,
-      expires_at: created.expires_at,
-      created_by: caller.email ?? caller.id,
-    },
-  });
-
-  return NextResponse.json({ ok: true, client: created });
+  return NextResponse.json({ ok: true, client: result.client, email_warning: result.emailWarning });
 }

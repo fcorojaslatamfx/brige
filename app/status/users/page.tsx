@@ -6,6 +6,17 @@ import styles from "../status.module.css";
 
 type Role = "super_admin" | "admin";
 
+/**
+ * Lo que se puede dar de alta desde este formulario. "cliente" NO es un `Role`:
+ * no se guarda en `user_roles`, no da acceso al panel y por debajo toma el
+ * camino de `client_tokens`. Comparte formulario porque para el operador es el
+ * mismo gesto — dar de alta a alguien — pero los tipos los mantienen separados.
+ */
+type InviteKind = Role | "cliente";
+type Expiry = "7d" | "14d" | "30d" | "never";
+
+type AdminOption = { user_id: string; email: string | null; role: string };
+
 type UserRow = {
   user_id: string;
   email: string | null;
@@ -25,9 +36,23 @@ export default function UsersPage() {
   const [busyId, setBusyId] = useState<string | null>(null);
 
   const [inviteEmail, setInviteEmail] = useState("");
-  const [inviteRole, setInviteRole] = useState<Role>("admin");
+  const [inviteRole, setInviteRole] = useState<InviteKind>("admin");
   const [inviting, setInviting] = useState(false);
   const [inviteMsg, setInviteMsg] = useState<string | null>(null);
+
+  // Campos que solo aplican al alta de cliente.
+  const [admins, setAdmins] = useState<AdminOption[]>([]);
+  const [cName, setCName] = useState("");
+  const [cLastName, setCLastName] = useState("");
+  const [cPhone, setCPhone] = useState("");
+  const [cBroker, setCBroker] = useState("");
+  const [cAccountType, setCAccountType] = useState<"demo" | "real">("demo");
+  const [cAccountNumber, setCAccountNumber] = useState("");
+  const [cBrokerServer, setCBrokerServer] = useState("");
+  const [cAssignedAdmin, setCAssignedAdmin] = useState("");
+  const [cExpiry, setCExpiry] = useState<Expiry>("30d");
+
+  const esCliente = inviteRole === "cliente";
 
   const fetchUsers = useCallback(async () => {
     try {
@@ -48,28 +73,84 @@ export default function UsersPage() {
     }
   }, []);
 
+  // La lista de admins se usa solo para asignar un cliente a su admin dueño.
+  // Se pide una vez, no en cada render del formulario.
+  const fetchAdmins = useCallback(async () => {
+    try {
+      const res = await fetch("/api/clients", { cache: "no-store" });
+      if (!res.ok) return;
+      const json = await res.json();
+      if (json.ok) setAdmins(json.admins ?? []);
+    } catch {
+      // Sin lista de admins el alta sigue siendo posible: queda "sin asignar".
+    }
+  }, []);
+
   useEffect(() => {
     fetchUsers();
-  }, [fetchUsers]);
+    fetchAdmins();
+  }, [fetchUsers, fetchAdmins]);
+
+  function limpiarFormulario() {
+    setInviteEmail("");
+    setCName("");
+    setCLastName("");
+    setCPhone("");
+    setCBroker("");
+    setCAccountType("demo");
+    setCAccountNumber("");
+    setCBrokerServer("");
+    setCAssignedAdmin("");
+  }
 
   async function handleInvite(e: React.FormEvent) {
     e.preventDefault();
     if (!inviteEmail.trim()) return;
+    if (esCliente && (!cName.trim() || !cLastName.trim() || !cPhone.trim() || !cBroker.trim() || !cAccountNumber.trim() || !cBrokerServer.trim())) {
+      return;
+    }
+
     setInviting(true);
     setInviteMsg(null);
     try {
+      const payload = esCliente
+        ? {
+            role: "cliente",
+            email: inviteEmail.trim(),
+            client_name: cName.trim(),
+            client_last_name: cLastName.trim(),
+            client_phone: cPhone.trim(),
+            broker: cBroker.trim(),
+            account_type: cAccountType,
+            account_number: cAccountNumber.trim(),
+            broker_server: cBrokerServer.trim(),
+            assigned_admin: cAssignedAdmin || undefined,
+            expiry: cExpiry,
+          }
+        : { email: inviteEmail.trim(), role: inviteRole };
+
       const res = await fetch("/api/users/invite", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email: inviteEmail.trim(), role: inviteRole }),
+        body: JSON.stringify(payload),
       });
       const json = await res.json();
       if (!json.ok) {
         setInviteMsg(`Error: ${json.error ?? "no se pudo invitar"}`);
         return;
       }
-      setInviteMsg(json.is_existing ? "Rol actualizado y correo enviado." : "Invitación enviada.");
-      setInviteEmail("");
+
+      if (json.kind === "cliente") {
+        setInviteMsg(
+          json.email_warning
+            ? `Cliente creado, pero ${json.email_warning}. Su token está en la sección Invitación.`
+            : "Cliente invitado: se le envió su token y se avisó a los super admin.",
+        );
+      } else {
+        setInviteMsg(json.is_existing ? "Rol actualizado y correo enviado." : "Invitación enviada.");
+      }
+
+      limpiarFormulario();
       await fetchUsers();
     } catch {
       setInviteMsg("No se pudo contactar al bridge.");
@@ -142,7 +223,7 @@ export default function UsersPage() {
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <Link href="/status/clients" className={styles.navLink} style={{ textDecoration: "none" }}>
-            Clientes
+            Invitación
           </Link>
           <Link href="/status" className={styles.gateButton} style={{ textDecoration: "none" }}>
             Volver al panel
@@ -166,16 +247,116 @@ export default function UsersPage() {
           />
           <select
             value={inviteRole}
-            onChange={(e) => setInviteRole(e.target.value as Role)}
+            onChange={(e) => setInviteRole(e.target.value as InviteKind)}
             className={styles.settingsInput}
           >
             <option value="admin">Admin</option>
             <option value="super_admin">Super Admin</option>
+            <option value="cliente">Cliente</option>
           </select>
+
+          {esCliente && (
+            <>
+              <input
+                type="text"
+                value={cName}
+                onChange={(e) => setCName(e.target.value)}
+                placeholder="Nombre"
+                className={styles.settingsInput}
+                style={{ minWidth: 140 }}
+                required
+              />
+              <input
+                type="text"
+                value={cLastName}
+                onChange={(e) => setCLastName(e.target.value)}
+                placeholder="Apellido"
+                className={styles.settingsInput}
+                style={{ minWidth: 140 }}
+                required
+              />
+              <input
+                type="tel"
+                value={cPhone}
+                onChange={(e) => setCPhone(e.target.value)}
+                placeholder="+56 9 1234 5678"
+                className={styles.settingsInput}
+                style={{ minWidth: 150 }}
+                required
+              />
+              <input
+                type="text"
+                value={cBroker}
+                onChange={(e) => setCBroker(e.target.value)}
+                placeholder="Bróker (ej. Tradeview)"
+                className={styles.settingsInput}
+                style={{ minWidth: 160 }}
+                required
+              />
+              <select
+                value={cAccountType}
+                onChange={(e) => setCAccountType(e.target.value as "demo" | "real")}
+                className={styles.settingsInput}
+                style={cAccountType === "real" ? { color: "var(--red)", fontWeight: 700 } : undefined}
+                required
+              >
+                <option value="demo">Cuenta Demo</option>
+                <option value="real">Cuenta Real</option>
+              </select>
+              <input
+                type="text"
+                value={cAccountNumber}
+                onChange={(e) => setCAccountNumber(e.target.value)}
+                placeholder="N° de cuenta"
+                className={styles.settingsInput}
+                style={{ minWidth: 130 }}
+                required
+              />
+              <input
+                type="text"
+                value={cBrokerServer}
+                onChange={(e) => setCBrokerServer(e.target.value)}
+                placeholder="Servidor (ej. Tradeview-Demo)"
+                className={styles.settingsInput}
+                style={{ minWidth: 180 }}
+                required
+              />
+              <select
+                value={cAssignedAdmin}
+                onChange={(e) => setCAssignedAdmin(e.target.value)}
+                className={styles.settingsInput}
+              >
+                <option value="">Admin (sin asignar)</option>
+                {admins.map((a) => (
+                  <option key={a.user_id} value={a.user_id}>
+                    {a.email ?? a.user_id}
+                  </option>
+                ))}
+              </select>
+              <select
+                value={cExpiry}
+                onChange={(e) => setCExpiry(e.target.value as Expiry)}
+                className={styles.settingsInput}
+              >
+                <option value="7d">Caduca en 7 días</option>
+                <option value="14d">Caduca en 14 días</option>
+                <option value="30d">Caduca en 30 días</option>
+                <option value="never">Indefinido</option>
+              </select>
+            </>
+          )}
+
           <button type="submit" className={styles.navLink} disabled={inviting}>
-            {inviting ? "Enviando…" : "Invitar"}
+            {inviting ? "Enviando…" : "Invitación"}
           </button>
         </form>
+        {esCliente && (
+          <p className={styles.hint}>
+            Un cliente NO accede al panel: no se le crea cuenta ni contraseña. Recibe por correo su token de señales
+            para configurarlo en el EA de MetaTrader, y todos los Super Admin reciben un aviso del alta. Aparece en la
+            sección <Link href="/status/clients">Invitación</Link>, no en la tabla de abajo.
+          </p>
+        )}
         {inviteMsg && <p className={styles.hint}>{inviteMsg}</p>}
       </section>
 

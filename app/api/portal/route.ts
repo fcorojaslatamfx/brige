@@ -34,7 +34,7 @@ export async function GET(req: NextRequest) {
     ok: true,
     server_time: Date.now(),
     client: {
-      name: client.client_name,
+      name: `${client.client_name} ${client.client_last_name}`.trim(),
       email: client.client_email,
       token: client.token,
       expires_at: client.expires_at,

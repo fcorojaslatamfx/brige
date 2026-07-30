@@ -13,7 +13,9 @@ export const EXPIRY_DAYS: Record<Exclude<ClientExpiry, "never">, number> = {
 export type ClientTokenRow = {
   id: string;
   token: string;
-  client_name: string | null;
+  /** Nombre de pila. Obligatorio desde la migración 017 (antes: nombre completo opcional). */
+  client_name: string;
+  client_last_name: string;
   client_email: string;
   client_phone: string;
   broker: string;
@@ -55,7 +57,8 @@ export function clientStatus(row: Pick<ClientTokenRow, "revoked_at" | "expires_a
 }
 
 export async function createClientToken(input: {
-  client_name?: string | null;
+  client_name: string;
+  client_last_name: string;
   client_email: string;
   client_phone: string;
   broker: string;
@@ -71,7 +74,8 @@ export async function createClientToken(input: {
     .from("client_tokens")
     .insert({
       token,
-      client_name: input.client_name?.trim() || null,
+      client_name: input.client_name.trim(),
+      client_last_name: input.client_last_name.trim(),
       client_email: input.client_email.toLowerCase().trim(),
       client_phone: input.client_phone.trim(),
       broker: input.broker.trim(),
@@ -86,6 +90,26 @@ export async function createClientToken(input: {
     .single();
   if (error || !data) throw new Error(`No se pudo crear el token de cliente: ${error?.message ?? "sin datos"}`);
   return data as ClientTokenRow;
+}
+
+/**
+ * Proyección de una fila de cliente a los datos que consumen los correos.
+ *
+ * Existe para que `lib/email.ts` no dependa de la forma de la tabla: el correo
+ * necesita "nombre, apellido, cuenta y vigencia", no una ClientTokenRow.
+ */
+export function toClientEmailData(row: ClientTokenRow) {
+  return {
+    firstName: row.client_name,
+    lastName: row.client_last_name,
+    email: row.client_email,
+    phone: row.client_phone,
+    broker: row.broker,
+    accountType: row.account_type,
+    accountNumber: row.account_number,
+    brokerServer: row.broker_server,
+    expiresAt: row.expires_at,
+  };
 }
 
 /** Lista de clientes. Con `assignedAdmin` filtra a los de ese admin (dashboard de admin). */

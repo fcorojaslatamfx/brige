@@ -16,6 +16,61 @@ Vercel despliega preview por rama y producción desde `main`.
 
 ## [Sin liberar]
 
+### Invitación de clientes con correos, y correos con la identidad de pessaro.cl · `62530ec` · 29-jul-2026
+
+Cuatro pedidos del operador: nombre/apellido/móvil/correo en la sección de
+clientes con aviso por correo al invitado y al super admin, rol cliente en el
+formulario de invitar usuario, renombrar el botón a «Invitación», y correos con
+la paleta y el footer de pessaro.cl.
+
+- `supabase/migrations/017_client_first_last_name.sql` (nuevo, **aplicada**):
+  `client_tokens.client_last_name`, y `client_name` pasa a ser el NOMBRE DE
+  PILA. Ambos `NOT NULL` con backfill idempotente `'SIN_DATO'` (precedente de la
+  015). La tabla tenía 0 filas, así que el backfill fue un no-op. La columna no
+  se renombró a propósito: la leen `lib/clients.ts`, el portal y el panel, y
+  renombrarla obligaba a tocar todo eso a cambio de nada.
+- **Rol «cliente» en Invitar usuario.** El desplegable de `/status/users` suma
+  Cliente; con ese rol aparecen los campos del cliente y el alta toma el camino
+  de `client_tokens`. **No** entra en `roleSchema`: un cliente no tiene fila en
+  `user_roles`, no inicia sesión y no se le crea cuenta en Supabase Auth.
+  Meterlo en `roleSchema` lo habría hecho asignable desde `/api/users/role` y
+  habría chocado con el CHECK de la tabla. `inviteSchema` es una unión
+  discriminada por `role`; hay un test que fija esa barrera.
+- `lib/client-onboarding.ts` (nuevo): el alta, el correo al cliente y el aviso a
+  los super_admin viven juntos porque hay DOS puertas al mismo gesto
+  (`/api/clients` y `/api/users/invite` con `role="cliente"`). Duplicar el flujo
+  garantizaba que una de las dos dejara de mandar algún correo.
+  - Los correos **no** abortan el alta: el token ya existe y es visible en el
+    panel, así que si Resend falla se devuelve `email_warning` y el operador
+    reenvía con Compartir. Fallar ahí borraría de la respuesta un cliente creado.
+  - Los destinatarios del aviso se resuelven en cada envío con
+    `listSuperAdminEmails()`, no desde una lista fija: quien deja de ser
+    super_admin deja de recibirlos sin que nadie tenga que acordarse.
+  - El aviso **no lleva el token**: un correo de notificación se reenvía y se
+    archiva; el token vive en el correo del cliente y en el panel, bajo sesión.
+- **Correos con la identidad de pessaro.cl** (`lib/email.ts` reescrito): paleta
+  navy/púrpura/dorado calcada de `pessarocl/src/index.css`, CTA púrpura
+  (`.btn-primary` del sitio) y dorado reservado a lo premium — el token del
+  cliente y el wordmark.
+  - Footer legal calcado del footer real del sitio
+    (`pessarocl/src/components/Layout.tsx` + la clase `.legal-box`): las tres
+    cajas comparten UNA paleta navy, sin el borde ámbar ni el rojo que tenían
+    antes (el FIX v6.1 del sitio las unificó para que ninguna advertencia
+    pareciera más grave que otra por su color).
+  - ⚠ **Cambio de copy legal:** el sitio dejó de exponer «SpA» y el RUT en el
+    párrafo de Advertencia Legal Obligatoria (decisión del 24-jul-2026, ver
+    `pessarocl/FIX_v6.1_footer_dedup_paleta.md`) y el correo seguía con el texto
+    viejo. Ahora coinciden. La identificación completa sigue en
+    `LEGAL_SOURCE.md`, que es documento de registro, no copy público.
+  - El wordmark va como texto y no como el logo de `lib/pessaro-logo.ts`: ese
+    asset es `.webp` y Outlook lo dejaría como un hueco en cada correo.
+  - `build*` puros (asunto + HTML) separados de los `send*`, y
+    `scripts/preview-emails.ts` para revisar los 5 correos en el navegador sin
+    mandar nada ni necesitar `RESEND_API_KEY`. Verificados visualmente.
+- Renombres: el enlace de navegación «Clientes» y el botón de alta pasan a
+  «Invitación»; el panel de la sección se llama «Invitar cliente».
+- 53/53 tests (4 nuevos de esquema), `tsc --noEmit` y `next build` limpios.
+
 ### EA v2.0 + supresión de setups efímeros · `5744b14` · 29-jul-2026
 
 Investigación de tres preguntas del operador: (1) los setups del indicador no se
