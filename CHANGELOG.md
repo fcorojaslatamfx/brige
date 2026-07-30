@@ -16,6 +16,33 @@ Vercel despliega preview por rama y producción desde `main`.
 
 ## [Sin liberar]
 
+### Revisión estática del EA v2.0: alto del panel y repintado · sin commit · 29-jul-2026
+
+El EA v2.0 se entregó sin haber pasado nunca por un compilador (no hay MetaEditor
+en el entorno donde se escribió). Revisión estática en busca de lo que frenaría
+al operador en MetaEditor o se vería mal en el gráfico. Dos defectos reales:
+
+- **El fondo del panel se quedaba corto.** `CreateBackground()` recibía un alto
+  calculado con la constante `200 + filas × 15`, pero el contenido real ronda los
+  280 px con 0 filas: la franja inferior caía fuera del recuadro. El alto no se
+  puede saber por adelantado porque las filas son variables y el bloque de cupo
+  aparece o no. Se parte en dos: `EnsureBackground()` crea el rectángulo primero
+  —en MT4 los objetos del mismo plano se dibujan en orden de creación, así que
+  tiene que nacer antes que las etiquetas o las taparía— y `SizeBackground()` lo
+  dimensiona al final, con la `y` ya medida.
+- **Faltaba `ChartRedraw()`.** Es el mismo defecto que el R6 pero en el
+  repintado: MT4 refresca los objetos cuando llega un evento del gráfico, y en un
+  símbolo que no cotiza no llega ninguno. El polling avanzaría por
+  `GetTickCount()` y el trader seguiría viendo el estado de hace horas — peor que
+  verlo OFFLINE, porque parece fresco.
+
+Lo que sí quedó verificado: las 17 llamadas a `StringFormat` cuadran en número de
+especificadores y argumentos; llaves 105/105 y paréntesis 570/570 balanceados
+ignorando comentarios y literales; 48 bloques de nivel 0 abiertos y cerrados; y
+las 50 llamadas a la plataforma existen todas en MQL4 build 600+, sin API de
+MQL5 colada. **Esto no sustituye a compilar:** sigue pendiente abrirlo en
+MetaEditor y pulsar F7.
+
 ### Invitación de clientes con correos, y correos con la identidad de pessaro.cl · `62530ec` · 29-jul-2026
 
 Cuatro pedidos del operador: nombre/apellido/móvil/correo en la sección de
