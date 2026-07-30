@@ -16,7 +16,7 @@ Vercel despliega preview por rama y producción desde `main`.
 
 ## [Sin liberar]
 
-### Invitación de clientes con correos, y correos con la identidad de pessaro.cl · sin commit · 29-jul-2026
+### Invitación de clientes con correos, y correos con la identidad de pessaro.cl · `62530ec` · 29-jul-2026
 
 Cuatro pedidos del operador: nombre/apellido/móvil/correo en la sección de
 clientes con aviso por correo al invitado y al super admin, rol cliente en el
