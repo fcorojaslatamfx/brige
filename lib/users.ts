@@ -73,6 +73,18 @@ export async function listUsersWithRoles(): Promise<UserRow[]> {
   }));
 }
 
+/**
+ * Correos de todos los super_admin vigentes, para los avisos operativos.
+ *
+ * Se resuelve en cada envío en vez de fijar una casilla en configuración: si
+ * alguien deja de ser super_admin, deja de recibir estos avisos sin que nadie
+ * tenga que acordarse de sacarlo de una lista.
+ */
+export async function listSuperAdminEmails(): Promise<string[]> {
+  const users = await listUsersWithRoles();
+  return users.filter((u) => u.role === "super_admin" && u.email).map((u) => u.email as string);
+}
+
 export async function findAuthUserByEmail(email: string) {
   const { data, error } = await supabase.auth.admin.listUsers({ page: 1, perPage: 1000 });
   if (error) throw new Error(`No se pudo buscar el usuario: ${error.message}`);

@@ -14,7 +14,8 @@ type Expiry = "7d" | "14d" | "30d" | "never";
 type ClientRow = {
   id: string;
   token: string;
-  client_name: string | null;
+  client_name: string;
+  client_last_name: string;
   client_email: string;
   client_phone: string;
   broker: string;
@@ -56,6 +57,7 @@ export default function ClientsPage() {
   const isSuper = role === "super_admin";
 
   const [name, setName] = useState("");
+  const [lastName, setLastName] = useState("");
   const [email, setEmail] = useState("");
   const [phone, setPhone] = useState("");
   const [broker, setBroker] = useState("");
@@ -101,7 +103,16 @@ export default function ClientsPage() {
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
-    if (!email.trim() || !phone.trim() || !broker.trim() || !accountNumber.trim() || !brokerServer.trim()) return;
+    if (
+      !name.trim() ||
+      !lastName.trim() ||
+      !email.trim() ||
+      !phone.trim() ||
+      !broker.trim() ||
+      !accountNumber.trim() ||
+      !brokerServer.trim()
+    )
+      return;
     setCreating(true);
     setNotice(null);
     try {
@@ -109,7 +120,8 @@ export default function ClientsPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          client_name: name.trim() || undefined,
+          client_name: name.trim(),
+          client_last_name: lastName.trim(),
           client_email: email.trim(),
           client_phone: phone.trim(),
           assigned_admin: assignedAdmin || undefined,
@@ -126,6 +138,7 @@ export default function ClientsPage() {
         return;
       }
       setName("");
+      setLastName("");
       setEmail("");
       setPhone("");
       setBroker("");
@@ -134,7 +147,11 @@ export default function ClientsPage() {
       setBrokerServer("");
       setAssignedAdmin("");
       setRevealed((prev) => new Set(prev).add(json.client.id));
-      setNotice("Cliente creado. Su token ya está visible abajo — cópialo o compártelo por correo.");
+      setNotice(
+        json.email_warning
+          ? `Cliente creado, pero ${json.email_warning}. Su token está visible abajo: puedes reenviarlo con Compartir.`
+          : "Cliente invitado. Se le envió su token por correo y se avisó a los super admin.",
+      );
       await fetchClients();
     } catch {
       setError("No se pudo crear el cliente.");
@@ -216,7 +233,9 @@ export default function ClientsPage() {
         <div>
           <h1 className={styles.title}>PESSARO BRIDGE</h1>
           <p className={styles.subtitle}>
-            {isSuper ? "Clientes · tokens de señales por lead/contacto" : "Mis clientes · tokens compartidos por Pessaro"}
+            {isSuper
+              ? "Invitación · clientes con token de señales"
+              : "Mis clientes · tokens compartidos por Pessaro"}
           </p>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
@@ -249,15 +268,25 @@ export default function ClientsPage() {
 
       {isSuper && (
       <section className={styles.panel}>
-        <h2 className={styles.panelTitle}>Generar token de cliente</h2>
+        <h2 className={styles.panelTitle}>Invitar cliente</h2>
         <form onSubmit={handleCreate} style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
           <input
             type="text"
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder="Nombre (opcional)"
+            placeholder="Nombre"
             className={styles.settingsInput}
-            style={{ minWidth: 160 }}
+            style={{ minWidth: 140 }}
+            required
+          />
+          <input
+            type="text"
+            value={lastName}
+            onChange={(e) => setLastName(e.target.value)}
+            placeholder="Apellido"
+            className={styles.settingsInput}
+            style={{ minWidth: 140 }}
+            required
           />
           <input
             type="email"
@@ -333,11 +362,12 @@ export default function ClientsPage() {
             <option value="never">Indefinido</option>
           </select>
           <button type="submit" className={styles.navLink} disabled={creating}>
-            {creating ? "Generando…" : "Generar token"}
+            {creating ? "Enviando…" : "Invitación"}
           </button>
         </form>
         <p className={styles.hint}>
-          Solo el Super Admin puede generar tokens. Cada token pertenece a un único cliente (correo + móvil) y se
+          Solo el Super Admin puede invitar clientes. Al enviar, el cliente recibe su token por correo y todos los
+          Super Admin reciben un aviso del alta. Cada token pertenece a un único cliente (correo + móvil) y se
           configura en el campo <span className={styles.mono}>InpEaToken</span> del EA de MetaTrader del cliente.
         </p>
       </section>
@@ -362,7 +392,7 @@ export default function ClientsPage() {
             {(clients ?? []).map((c) => (
               <tr key={c.id} className={c.status !== "active" ? styles.rowWarning : undefined}>
                 <td>
-                  <div>{c.client_name ?? "—"}</div>
+                  <div>{`${c.client_name} ${c.client_last_name}`.trim()}</div>
                   <div className={styles.hint} style={{ margin: 0 }}>
                     {c.client_email}
                     {" · "}

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { supabase } from "@/lib/supabase";
 import { getAuthenticatedUser } from "@/lib/auth";
-import { getClientToken, clientStatus } from "@/lib/clients";
+import { getClientToken, clientStatus, toClientEmailData } from "@/lib/clients";
 import { sendClientTokenEmail } from "@/lib/email";
 import { shareClientSchema } from "@/lib/schema";
 
@@ -38,12 +38,7 @@ export async function POST(req: NextRequest) {
 
   let resendId: string;
   try {
-    resendId = await sendClientTokenEmail({
-      to: client.client_email,
-      clientName: client.client_name,
-      token: client.token,
-      expiresAt: client.expires_at,
-    });
+    resendId = await sendClientTokenEmail({ client: toClientEmailData(client), token: client.token });
   } catch (e) {
     return NextResponse.json({ ok: false, error: e instanceof Error ? e.message : "error" }, { status: 500 });
   }

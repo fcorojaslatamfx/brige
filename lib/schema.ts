@@ -131,6 +131,36 @@ export const tokenKindSchema = z.enum(["tv_webhook", "ea", "operator"]);
 export const tokenRegenerateSchema = z.object({ kind: tokenKindSchema });
 export type TokenKindInput = z.infer<typeof tokenKindSchema>;
 
+/** Caducidad de un token de cliente (ver lib/clients.ts). */
+export const clientExpirySchema = z.enum(["7d", "14d", "30d", "never"]);
+
+/**
+ * Perfil del cliente SIN el correo, compartido por los dos caminos de alta:
+ * POST /api/clients (sección Clientes) y POST /api/users/invite con
+ * role="cliente". El correo va aparte porque en el formulario de invitación es
+ * el campo `email` de más arriba, no un `client_email`.
+ *
+ * Todos obligatorios y sin `.optional()`: ese es el mecanismo real de
+ * "requerido" — el `required` de HTML lo saltaría un fetch directo a la API.
+ * Nombre y apellido pasaron a serlo en la migración 017: los correos que salen
+ * saludan al cliente por su nombre, y un "Hola," vacío es un defecto visible.
+ *
+ * Va declarado ANTES de los esquemas de invitación porque `inviteClientSchema`
+ * lo expande: un `const` no se iza, y tenerlo abajo reventaba en la carga del
+ * módulo por zona muerta temporal.
+ */
+const clientProfileFields = {
+  client_name: z.string().trim().min(1, "El nombre es obligatorio").max(80),
+  client_last_name: z.string().trim().min(1, "El apellido es obligatorio").max(80),
+  client_phone: z.string().trim().min(3, "El móvil es obligatorio").max(30),
+  broker: z.string().trim().min(1, "El bróker es obligatorio").max(80),
+  account_type: z.enum(["demo", "real"], { errorMap: () => ({ message: "Tipo de cuenta inválido" }) }),
+  account_number: z.string().trim().min(1, "El número de cuenta es obligatorio").max(40),
+  broker_server: z.string().trim().min(1, "El servidor del bróker es obligatorio").max(80),
+  assigned_admin: z.string().uuid().optional(),
+  expiry: clientExpirySchema,
+};
+
 /** Roles gestionados desde /status/users (ver lib/users.ts). */
 export const roleSchema = z.enum(["super_admin", "admin"]);
 export type Role = z.infer<typeof roleSchema>;
@@ -140,6 +170,31 @@ export const inviteUserSchema = z.object({
   role: roleSchema,
 });
 export type InviteUserInput = z.infer<typeof inviteUserSchema>;
+
+/**
+ * Alta desde /status/users con rol "cliente".
+ *
+ * `cliente` NO entra en `roleSchema` a propósito: un cliente no es usuario del
+ * panel, no tiene fila en `user_roles` y no puede iniciar sesión. Comparte el
+ * formulario de invitación porque para el operador es el mismo gesto ("dar de
+ * alta a alguien"), pero por debajo es el flujo de `client_tokens`. Meterlo en
+ * `roleSchema` lo haría asignable desde /api/users/role y chocaría con el CHECK
+ * de la tabla.
+ */
+export const inviteClientSchema = z.object({
+  role: z.literal("cliente"),
+  email: z.string().email(),
+  ...clientProfileFields,
+});
+export type InviteClientInput = z.infer<typeof inviteClientSchema>;
+
+/** Body de POST /api/users/invite: usuario del panel o cliente, discriminado por `role`. */
+export const inviteSchema = z.discriminatedUnion("role", [
+  z.object({ role: z.literal("admin"), email: z.string().email() }),
+  z.object({ role: z.literal("super_admin"), email: z.string().email() }),
+  inviteClientSchema,
+]);
+export type InviteInput = z.infer<typeof inviteSchema>;
 
 export const changeRoleSchema = z.object({
   user_id: z.string().uuid(),
@@ -155,23 +210,10 @@ export const forgotPasswordSchema = z.object({
   email: z.string().email(),
 });
 
-/** Caducidad de un token de cliente (ver lib/clients.ts). */
-export const clientExpirySchema = z.enum(["7d", "14d", "30d", "never"]);
-
 /** Body de POST /api/clients: crear token de cliente (solo super_admin). */
 export const createClientSchema = z.object({
-  client_name: z.string().max(120).optional(),
+  ...clientProfileFields,
   client_email: z.string().email(),
-  client_phone: z.string().min(3).max(30),
-  assigned_admin: z.string().uuid().optional(),
-  expiry: clientExpirySchema,
-  // Datos de la cuenta de bróker del cliente. Los cuatro son obligatorios: sin
-  // `.optional()` es el mecanismo real de "requerido" (el `required` de HTML lo
-  // podría saltar un fetch directo a la API).
-  broker: z.string().trim().min(1, "El bróker es obligatorio").max(80),
-  account_type: z.enum(["demo", "real"], { errorMap: () => ({ message: "Tipo de cuenta inválido" }) }),
-  account_number: z.string().trim().min(1, "El número de cuenta es obligatorio").max(40),
-  broker_server: z.string().trim().min(1, "El servidor del bróker es obligatorio").max(80),
 });
 export type CreateClientInput = z.infer<typeof createClientSchema>;
 

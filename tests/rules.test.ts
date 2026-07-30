@@ -1,6 +1,15 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { NextRequest } from "next/server";
-import { ackSchema, settingsUpdateSchema, webhookPayloadSchema, createClientSchema } from "../lib/schema";
+import {
+  ackSchema,
+  settingsUpdateSchema,
+  webhookPayloadSchema,
+  createClientSchema,
+  inviteSchema,
+  inviteUserSchema,
+  changeRoleSchema,
+  roleSchema,
+} from "../lib/schema";
 import { isFresh, safeTokenEquals, toEaPayload, type SignalRow } from "../lib/counts";
 import { computeEaPollStatus, getToken, type TokenKind } from "../lib/tokens";
 import { computeExpiresAt, clientStatus, buildClientReport, type ClientDeliveredSignal } from "../lib/clients";
@@ -220,6 +229,8 @@ describe("lib/schema · ack y settings", () => {
 
 describe("lib/schema · tokens de cliente", () => {
   const base = {
+    client_name: "Juan",
+    client_last_name: "Pérez",
     client_email: "lead@ejemplo.com",
     client_phone: "+56912345678",
     expiry: "30d" as const,
@@ -229,9 +240,9 @@ describe("lib/schema · tokens de cliente", () => {
     broker_server: "Tradeview-Demo",
   };
 
-  it("acepta una creación válida con caducidad y campos opcionales", () => {
-    expect(createClientSchema.safeParse({ ...base, client_name: "Lead X" }).success).toBe(true);
+  it("acepta una creación válida", () => {
     expect(createClientSchema.safeParse(base).success).toBe(true);
+    expect(createClientSchema.safeParse({ ...base, assigned_admin: crypto.randomUUID() }).success).toBe(true);
   });
 
   it("rechaza correo inválido, teléfono vacío y caducidad desconocida", () => {
@@ -248,6 +259,49 @@ describe("lib/schema · tokens de cliente", () => {
     }
     expect(createClientSchema.safeParse({ ...base, broker: "" }).success).toBe(false);
     expect(createClientSchema.safeParse({ ...base, account_type: "margin" }).success).toBe(false);
+  });
+
+  it("§017: nombre y apellido son obligatorios (antes el nombre era opcional)", () => {
+    for (const field of ["client_name", "client_last_name"] as const) {
+      const { [field]: _omit, ...rest } = base;
+      void _omit;
+      expect(createClientSchema.safeParse(rest).success).toBe(false);
+      expect(createClientSchema.safeParse({ ...base, [field]: "   " }).success).toBe(false);
+    }
+  });
+});
+
+describe("lib/schema · invitación: usuario del panel vs cliente", () => {
+  const perfilCliente = {
+    client_name: "Juan",
+    client_last_name: "Pérez",
+    client_phone: "+56912345678",
+    broker: "Tradeview",
+    account_type: "demo" as const,
+    account_number: "123456",
+    broker_server: "Tradeview-Demo",
+    expiry: "30d" as const,
+  };
+
+  it("admin y super_admin solo necesitan el correo", () => {
+    expect(inviteSchema.safeParse({ email: "a@b.cl", role: "admin" }).success).toBe(true);
+    expect(inviteSchema.safeParse({ email: "a@b.cl", role: "super_admin" }).success).toBe(true);
+  });
+
+  it("el rol cliente exige el perfil completo", () => {
+    expect(inviteSchema.safeParse({ email: "a@b.cl", role: "cliente", ...perfilCliente }).success).toBe(true);
+    // Sin los campos del cliente no pasa: el alta necesita bróker y cuenta.
+    expect(inviteSchema.safeParse({ email: "a@b.cl", role: "cliente" }).success).toBe(false);
+    expect(
+      inviteSchema.safeParse({ email: "a@b.cl", role: "cliente", ...perfilCliente, client_last_name: "" }).success,
+    ).toBe(false);
+  });
+
+  it("'cliente' NO es un rol del panel: no se puede asignar por /api/users/role", () => {
+    // Es la barrera que impide que un cliente termine con fila en user_roles.
+    expect(roleSchema.safeParse("cliente").success).toBe(false);
+    expect(changeRoleSchema.safeParse({ user_id: crypto.randomUUID(), role: "cliente" }).success).toBe(false);
+    expect(inviteUserSchema.safeParse({ email: "a@b.cl", role: "cliente" }).success).toBe(false);
   });
 });
 
@@ -483,6 +537,8 @@ describe.skipIf(!hasLiveCreds)("reglas de negocio (integración contra Supabase 
       .from("client_tokens")
       .insert({
         token,
+        client_name: "Test",
+        client_last_name: "Cliente",
         client_email: `c${Date.now()}${Math.random().toString(36).slice(2)}@${TEST_PREFIX}.local`,
         client_phone: "+56900000000",
         broker: "TESTBROKER",
