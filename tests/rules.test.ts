@@ -851,4 +851,65 @@ describe.skipIf(!hasLiveCreds)("reglas de negocio (integración contra Supabase 
 
     expect(entregadas.has(id)).toBe(true);
   });
+
+  // ---------- Migración 018 · cancelaciones huérfanas ----------
+
+  it("§018: una cancelación sin NADA que cancelar no llega al terminal", async () => {
+    // Ni siquiera existe una entrada previa de ese símbolo: cancelar algo que
+    // nunca se notificó no es información, es ruido.
+    const cancelId = await ingest(cancelPayload(`${TEST_PREFIX}_HUERF`, "CANCEL_ALL"));
+
+    const entregadas = await claimTestQueue(HOLD_LARGO);
+
+    expect(entregadas.has(cancelId)).toBe(false);
+    expect((await rowOf(cancelId)).status).toBe("suppressed");
+  });
+
+  it("§018: si el armado murió en cola sin entregarse, su cancelación tampoco sale", async () => {
+    // Es el caso de los 134 'expired' de producción: el terminal estaba apagado
+    // o el TTL mató el armado, y aun así la cancelación llegaba sola.
+    const sym = `${TEST_PREFIX}_TTL`;
+    const setupId = await ingest(setupPayload(sym, "SETUP_BUY"));
+    const cancelId = await ingest(cancelPayload(sym));
+
+    const entregadas = await claimTestQueue(HOLD_LARGO);
+
+    expect(entregadas.has(setupId)).toBe(false);
+    expect(entregadas.has(cancelId)).toBe(false);
+    for (const id of [setupId, cancelId]) {
+      expect((await rowOf(id)).status).toBe("suppressed");
+    }
+  });
+
+  it("§018 GUARDARRAÍL: con una entrada despachada y sin cerrar, la cancelación SÍ sale", async () => {
+    // La regla nueva no puede tapar la cancelación de algo que el trader tiene
+    // colocado por indicación nuestra. Este es el test que lo fija.
+    const sym = `${TEST_PREFIX}_VIVO`;
+    const despachado = await ingest(setupPayload(sym, "SETUP_BUY"));
+    expect((await claimTestQueue(0)).has(despachado)).toBe(true);
+
+    const cancelId = await ingest(cancelPayload(sym));
+    const entregadas = await claimTestQueue(HOLD_LARGO);
+
+    expect(entregadas.has(cancelId)).toBe(true);
+    expect((await rowOf(cancelId)).status).toBe("claimed");
+  });
+
+  it("§018: una segunda cancelación del mismo símbolo ya es huérfana", async () => {
+    // La cadena se cierra sola: la primera cancelación entregada "cierra" la
+    // entrada, así que la siguiente no tiene nada vivo detrás. Sin esto haría
+    // falta una ventana de tiempo arbitraria.
+    const sym = `${TEST_PREFIX}_CIERRE`;
+    const despachado = await ingest(setupPayload(sym, "SETUP_SELL"));
+    expect((await claimTestQueue(0)).has(despachado)).toBe(true);
+
+    const primera = await ingest(cancelPayload(sym, "CANCEL_ALL"));
+    expect((await claimTestQueue(0)).has(primera)).toBe(true);
+
+    const segunda = await ingest(cancelPayload(sym, "SETUP_CANCEL"));
+    const entregadas = await claimTestQueue(HOLD_LARGO);
+
+    expect(entregadas.has(segunda)).toBe(false);
+    expect((await rowOf(segunda)).status).toBe("suppressed");
+  });
 });

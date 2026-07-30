@@ -12,6 +12,7 @@ type Settings = {
   freshness_seconds: number;
   queue_ttl_seconds: number;
   setup_hold_seconds: number;
+  suppress_orphan_cancels: boolean;
   updated_at: string;
   updated_by: string | null;
 };
@@ -84,7 +85,12 @@ type StatusResponse = {
 type SettingsForm = Partial<
   Pick<
     Settings,
-    "symbol_threshold" | "global_threshold" | "freshness_seconds" | "queue_ttl_seconds" | "setup_hold_seconds"
+    | "symbol_threshold"
+    | "global_threshold"
+    | "freshness_seconds"
+    | "queue_ttl_seconds"
+    | "setup_hold_seconds"
+    | "suppress_orphan_cancels"
   >
 >;
 
@@ -138,6 +144,7 @@ export default function StatusPage() {
         freshness_seconds: data.settings.freshness_seconds,
         queue_ttl_seconds: data.settings.queue_ttl_seconds,
         setup_hold_seconds: data.settings.setup_hold_seconds,
+        suppress_orphan_cancels: data.settings.suppress_orphan_cancels,
       });
     }
   }, [data?.settings]);
@@ -320,10 +327,24 @@ export default function StatusPage() {
             onChange={(v) => setForm((f) => ({ ...f, setup_hold_seconds: v }))}
           />
         </div>
+        <label className={styles.hint} style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+          <input
+            type="checkbox"
+            checked={form.suppress_orphan_cancels ?? true}
+            onChange={(e) => setForm((f) => ({ ...f, suppress_orphan_cancels: e.target.checked }))}
+          />
+          Ocultar cancelaciones huérfanas
+        </label>
         <p className={styles.hint}>
           Retención: un SETUP BUY/SELL espera esos segundos antes de salir al terminal. Si en ese lapso llega su
           cancelación, la pareja se marca SUPRIMIDA y no suena en MT4. 0 desactiva la retención. Los disparos
           (BUY/SELL) nunca se retienen. Tiene que ser menor que el TTL de cola.
+        </p>
+        <p className={styles.hint}>
+          Cancelaciones huérfanas: una cancelación se entrega solo si hay una entrada de ese símbolo que sí salió al
+          terminal y que todavía no fue cerrada. Si no hay nada vivo que cancelar, no es información — es la
+          cancelación de algo que nunca se te notificó (murió por TTL o con el terminal apagado). Desmarca la casilla
+          para volver al comportamiento anterior; el guardarraíl no se toca, con algo vivo detrás siempre se entrega.
         </p>
         <button className={styles.saveButton} onClick={handleSaveSettings} disabled={savingSettings}>
           {savingSettings ? "Guardando…" : "Guardar umbrales"}
