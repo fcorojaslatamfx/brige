@@ -16,7 +16,7 @@ Vercel despliega preview por rama y producción desde `main`.
 
 ## [Sin liberar]
 
-### Revisión estática del EA v2.0: alto del panel y repintado · sin commit · 29-jul-2026
+### Revisión estática del EA v2.0: alto del panel y repintado · `91a074a` · 29-jul-2026
 
 El EA v2.0 se entregó sin haber pasado nunca por un compilador (no hay MetaEditor
 en el entorno donde se escribió). Revisión estática en busca de lo que frenaría
