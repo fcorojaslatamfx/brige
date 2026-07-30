@@ -16,7 +16,7 @@ Vercel despliega preview por rama y producción desde `main`.
 
 ## [Sin liberar]
 
-### Supresión de cancelaciones huérfanas · sin commit · 29-jul-2026
+### Supresión de cancelaciones huérfanas · `9fed5e5` · 29-jul-2026
 
 Decisión del operador sobre el pendiente que había quedado abierto en la 016.
 Medido en producción: **43 `CANCEL_ALL` notificadas frente a 134 entradas
