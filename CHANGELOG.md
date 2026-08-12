@@ -16,6 +16,232 @@ Vercel despliega preview por rama y producción desde `main`.
 
 ## [Sin liberar]
 
+### Redespliegue tras un build caído por Google Fonts · `81cdf08` · 12-ago-2026
+
+Commit vacío para relanzar el build. No hubo cambio de código: el despliegue de
+producción de `ab5c774` quedó en `ERROR` por una descarga externa fallida.
+
+```
+next/font error: Failed to fetch `DM Sans` from Google Fonts
+app/layout.tsx → Build failed because of webpack errors
+```
+
+- `staging` y `main` se construyeron con **100 ms de diferencia** sobre el mismo
+  árbol. El de staging consiguió la fuente y quedó `READY`; el de producción
+  agotó los tres reintentos contra `fonts.gstatic.com`.
+- El síntoma llegó disfrazado y costó media hora de diagnóstico: el EA v3
+  recibía **405** en cada poll, porque `brige.pessaro.cl` seguía sirviendo el
+  código anterior —el que solo exporta `GET`— mientras el build fallido no
+  reemplazaba nada. Parecía un problema de token o de cliente y no lo era.
+- ⚠️ **Pendiente:** `app/layout.tsx` usa `next/font` con Google Fonts, así que
+  cada build depende de una descarga externa en el camino crítico. Con dos
+  ramas construyendo a la vez la probabilidad de que vuelva a pasar no es
+  despreciable. Bajar el `.woff2` al repo y cargarlo con `next/font/local` lo
+  elimina.
+
+### Frescura del snapshot de equity · `008f72d` · 12-ago-2026
+
+Corrige un defecto introducido por la 020 el mismo día. `tp_snapshot_equity()`
+copiaba `tp_accounts` a `tp_equity_snapshots` cada noche **sin comprobar si el
+dato estaba fresco**. Un EA vive dentro de MetaTrader: cuando el cliente apaga
+el PC, deja de reportar. Con el terminal cinco días caído, el cron escribía
+cinco snapshots diarios con las MISMAS cifras congeladas y la curva salía una
+línea plana, indistinguible de cinco jornadas sin operar. Son dos hechos
+distintos y el gráfico los mostraba igual.
+
+- `supabase/migrations/022_equity_snapshot_freshness.sql` (nuevo, **aplicada**).
+  Una cuenta entra al snapshot solo si su telemetría es más reciente que
+  `p_max_staleness_hours`. Si no, no se escribe fila y la curva muestra un
+  **hueco**: un hueco dice "no sabemos", una línea plana afirma "el balance fue
+  este", y esa afirmación no la respalda ningún dato.
+- El daño no se quedaba en el gráfico. Al volver el terminal, el EA sube las
+  operaciones que cerraron mientras estuvo apagado, así que el balance de esos
+  días **sí** había cambiado; los snapshots ya escritos seguían mintiendo,
+  porque el cron solo toca `current_date` y nunca revisita el pasado.
+- **El umbral es 26 h y no dos** porque no mide "¿está vivo ahora?" sino "¿supimos
+  de este terminal en algún momento del día?". Muchos clientes apagan el PC de
+  noche y el cron corre a las 03:00 UTC: a esa hora su último reporte puede
+  tener ocho horas y seguir siendo una observación legítima de la jornada.
+- La función pasa de `int` a `jsonb` (`written` / `stale`) y el cron registra un
+  `warning` cuando `stale > 0`. Eso convierte el job diario en el **detector de
+  terminales caídos** que no existía: hasta ahora el operador solo se enteraba
+  entrando a `/status/clients` a mirar badges uno a uno — que es exactamente por
+  lo que el EA del operador llevó cinco días sin pollear sin que saltara nada.
+  Requiere `drop` + `create`: Postgres no deja cambiar el tipo de retorno con
+  `create or replace`.
+- Verificado con dos cuentas en una transacción revertida, una fresca y otra
+  envejecida cinco días: devuelve `written 1, stale 1`.
+
+### Fusión del Trading Portal y telemetría de cuenta en el EA · `7141789` · 12-ago-2026
+
+Unifica el proyecto Supabase del Trading Portal (`ckouxsidjkqhqfwvmakn`) dentro
+del proyecto del bridge y sustituye la integración planificada con **MetaApi**
+por telemetría enviada desde el propio terminal del cliente. El portal estaba
+**vacío** —0 filas en sus cinco tablas—, así que la fusión fue DDL puro sin
+migración de datos: la razón para hacerla ahora y no en seis meses.
+
+El hallazgo que ordena todo lo demás: **el EA ya está instalado en cada MT4 y ya
+hace un request cada 2 s** para recibir señales. El reporte de cuenta puede
+viajar DENTRO de ese request, así que cuesta cero peticiones nuevas. Con eso
+desaparecen —sin llegar a construirse— la suscripción a MetaApi (facturada por
+cuenta conectada), las edge functions `broker-connect`/`broker-sync`, el
+`pg_cron` cada 15–30 s y Realtime, además de un proyecto Supabase de pago.
+
+**1 · Esquema.**
+
+- `supabase/migrations/020_trading_portal.sql` (nuevo, **aplicada**). Las tablas
+  `tp_*` cuelgan de `client_tokens`, no de `auth.users`: los clientes del bridge
+  se autentican con su token opaco y no tienen cuenta en Supabase Auth.
+  Mantener las dos identidades habría obligado a sincronizarlas de por vida.
+- `unique (account_id, ticket)` es la **clave de idempotencia del ingest**. Sin
+  ella, un reenvío del EA tras reiniciar el terminal duplica el historial del
+  cliente.
+- `tp_ingest_telemetry()` escribe cuenta, posiciones e historial en **un solo
+  round-trip**, con el rate-limit dentro del `on conflict … where`: así es
+  atómico frente a polls concurrentes del mismo EA y no cuesta un `SELECT`
+  extra por request. Cortar por frecuencia descarta solo el bloque `account`;
+  los cierres se procesan igual, porque un cierre es un hecho irrepetible.
+- Fuera del esquema original: **`tp_ohlc`** (los gráficos usan el widget externo
+  de TradingView y el componente de lightweight-charts nunca se renderizaba —
+  habría sido la tabla más grande del sistema para alimentar a nadie),
+  **Realtime** (con telemetría a 60 s no aporta frescura y obliga a poner la
+  anon key en el navegador) y **`pg_cron`** (estaba creada y sin usar).
+- `019_client_token_expiry_required.sql` se versiona por fin: ya estaba aplicada
+  pero seguía sin trackear, y la 020 depende de ella.
+
+**2 · `supabase/migrations/021_hot_path_index.sql` (nuevo, aplicada) — el índice
+que faltaba.**
+
+El `UPDATE` de expiración que `claim_signals` corre en **cada** poll (~82.000
+al mes, medido en `pg_stat_statements`) no tenía índice: `idx_signals_pending`
+está restringido a `where status = 'pending'`, así que el planificador **no
+puede** usarlo para un predicado `status in ('pending','claimed')`. El `EXPLAIN`
+acababa recorriendo ~972 filas por `ux_signals_dedup_bar_time` y filtrando a
+mano. Con `idx_signals_open` pasa de `Bitmap Heap Scan` coste **226.53** a
+`Index Scan` coste **22.30**. `claim_signals` se recrea con una guarda
+`if exists` y la lógica de supresión de 016/018 intacta palabra por palabra.
+
+**3 · Contrato del EA.** `/api/signals` exporta `GET` y `POST` sobre un
+`handle()` común. Los EA v2 ya instalados siguen funcionando por GET
+**indefinidamente**: el despliegue del v3 es cliente a cliente y nadie tiene que
+actualizar para seguir recibiendo señales. La telemetría se procesa antes del
+claim y su fallo nunca corta la entrega — al trader le llega su entrada aunque
+el reporte de balance falle.
+
+**4 · `mt4/PessaroBridgeEA_v3.mq4` (nuevo).** Copia del v2.1 con la lógica de
+señales intacta.
+
+- El hash del conjunto de posiciones **excluye `current_price` y `profit`** a
+  propósito: cambian en cada tick, y meterlos convertiría "mandar cuando algo
+  cambie" en "mandar siempre", perdiendo el ahorro entero del diseño.
+- El historial solo se escanea cuando algo pudo haber cerrado, no cada 2 s:
+  `OrdersHistoryTotal()` puede tener decenas de miles de filas.
+- La **marca de agua la sirve el servidor**, no el terminal: un reinicio de MT4
+  no deja huecos ni obliga a persistir estado en disco.
+- `InpEnableSignals` / `InpEnableTelemetry` cubren cualquier combinación de
+  contratación: solo señales, solo portal, o ambas.
+- Anti-suplantación: el número de cuenta del terminal debe coincidir con el
+  registrado en `client_tokens`, o 409 + fila en `audit` y cero escrituras.
+  Atrapa sobre todo el caso real de adjuntar el EA al terminal equivocado.
+
+**5 · Portal.** Las siete páginas pasan a `app/portal/(trading)/` como
+componentes cliente, bajo un solo proveedor en el layout: antes cada página
+montaba sus propios hooks y navegar relanzaba tres consultas sin caché alguna.
+El navegador **ya no habla con Supabase** — se acabaron la anon key en el
+bundle, las políticas RLS del portal y el canal de Realtime por pestaña.
+Desaparecen los valores demo cableados (`?? 24850`, `?? 'MT4-284751'`) que
+mostraban cifras plausibles ajenas cuando no había datos; ahora se dice
+explícitamente que se espera al terminal. La pantalla de Cuenta **no** es un
+puerto literal de `Configuracion.jsx`: eran 597 líneas de formularios de
+credenciales MT5 para MetaApi, con el botón «Conectar cuenta» sin handler.
+
+**6 · Coste del camino caliente.** El heartbeat pasa de escribirse en cada poll
+a una vez cada 30 s: eran **71.435 `UPDATE` mensuales sobre la MISMA fila** para
+alimentar un badge. El umbral online/offline sube en consecuencia de 10 s a
+75 s — los dos valores están acoplados y viven juntos en `lib/heartbeat.ts`, un
+módulo **sin imports** para que el cliente service-role no acabe en el bundle
+del navegador. El refresco de `/status` baja de 5 s a 15 s (nueve consultas por
+refresco y por pestaña abierta).
+
+- ⚠️ Arrastra `lib/schema.ts` y `lib/clients.ts` con la feature de renovación de
+  tokens que estaba en el árbol de trabajo, porque `tests/rules.test.ts` la
+  referencia y sin ella el commit no compila aislado. Su route handler
+  (`app/api/clients/renew/`) sigue sin commitear; las funciones quedan sin usar
+  hasta entonces.
+- Verificación: `tsc` limpio y `next build` correcto sobre el árbol commiteado
+  **solo**, en un worktree aparte sin `.env.local` ni cambios sin commitear. La
+  suite de tests **no se corrió**: golpea el proyecto Supabase real y escribiría
+  señales de prueba en producción. Se adaptó el test del heartbeat, que asumía
+  el umbral de 10 s.
+
+### Pine v2.0, exportación de señales en MT4 y caducidad obligatoria de tokens · 03-ago-2026
+
+Tres frentes de una misma petición: que el **setup** que el indicador dibuja
+(ENTRADA + SL + TP1 60 % + TP2 40 %) llegue al terminal, que lo que llegó se
+pueda descargar, y que ningún acceso de cliente quede abierto para siempre.
+
+**1 · `tradingview/TD_Confluence_LON_NY_v2.pine` (nuevo).** Cierra el pendiente
+que llevaba abierto desde la migración 007: el indicador vivo seguía siendo el
+v1.x y **nadie emitía `SETUP_*`** aunque el bridge, la base y el EA los
+aceptaran desde hacía tres iteraciones.
+
+- `timestamp` pasa de `time` a `timenow` y la apertura de vela viaja aparte en
+  `bar_time`. Es el defecto 1-A: 149 señales muertas como `stale` y 215 como
+  `duplicate` en el histórico auditado.
+- **Emisión del armado con detección de flanco** (`dirPrev`), en el gráfico y en
+  los 14 slots. Sin el flanco, el setup se reemitiría en cada vela mientras
+  `dir` siguiera en ±2. `impAtrArm` es `var` porque el disparo resetea `dir` en
+  la misma vela y si no el impulso llegaría en 0.
+- El armado y el disparo pueden coincidir en una vela (el precio toca el nivel
+  antes del cierre): son dos `alert()` independientes, no un `else`.
+- La expiración de un setup pasa de `CANCEL_ALL` a `SETUP_CANCEL`, que es su
+  pareja real. El bridge ya trataba las dos igual (018), así que no hay cambio
+  de comportamiento en la supresión.
+- `grade` / `impulse_atr` (umbral ELITE configurable) y `risk_usd` calculado con
+  el perfil de CADA slot — antes todos reportaban el del gráfico anfitrión.
+- El filtrado de ruido **no** se toca aquí: sigue en el bridge (016 y 018), que
+  es la única capa que sabe si algo llegó de verdad al terminal.
+- ⚠️ Falta el paso que no se puede hacer desde el repo: pegarlo en TradingView y
+  dejar **una sola** alerta activa (ver `docs/PENDIENTE_PINE_v2.md`).
+
+**2 · `mt4/PessaroBridgeEA_v2.mq4` → v2.1.**
+
+- **R10 · exportación a CSV en `MQL4/Files`**, automática (se agrega al archivo
+  del día en cuanto llega la señal) y manual (botón «EXPORTAR CSV» que vuelca
+  toda la sesión). Búfer de historial aparte del panel: exportar solo las 10
+  filas visibles habría dejado el botón en adorno justo el día con movimiento.
+  Solo señales **efectivas** — la cuarentena no se exporta porque nunca se
+  notificó. Separador `;` para que abra en columnas en un Excel es-CL.
+- **R9 · paleta unificada con el indicador**: los tres temas (Dorado Elite,
+  Cyberpunk, Azul Naval) con los mismos hexes, banda de cabecera y zebrado de
+  filas. Los siete `input color` sueltos se reemplazan por un único `InpTema`.
+- El fondo, las franjas y el botón se crean en `OnInit` y en ese orden: MT4
+  dibuja por orden de creación y un rectángulo creado después tapa el texto.
+
+**3 · Caducidad obligatoria y renovación de tokens de cliente.**
+
+- `supabase/migrations/019_client_token_expiry_required.sql` (nuevo, **aplicada
+  el 12-ago-2026**, junto con la 020 que depende de ella). `expires_at` pasa a
+  `NOT NULL`; desaparece la opción "indefinido".
+  Backfill con `now() + 30 días` y no `created_at + 30 días`: fechar desde la
+  creación dejaría vencidos en el instante del deploy a clientes que están
+  usando su token hoy.
+- `POST /api/clients/renew` (nuevo, solo `super_admin`): extiende por 7, 14 o 30
+  días **sin cambiar el token** — el cliente no reconfigura su EA ni recibe un
+  secreto nuevo por correo cada mes. La vigencia cuenta desde el instante de la
+  operación, nunca acumulando sobre el saldo anterior.
+- El body lleva `client_email` como confirmación de identidad: el panel se
+  refresca cada 5 s y renovar por 30 días al cliente equivocado es un error
+  silencioso. El `UPDATE` filtra por `revoked_at is null` en la propia consulta,
+  no en un chequeo previo, para que una revocación concurrente no se deshaga.
+- Un token **caducado** se renueva (es el caso normal); uno **revocado** no —
+  se cortó a propósito y se devuelve el acceso dando de alta uno nuevo.
+- Correo de renovación al cliente (sin token) + entrada `client_token_renewed`
+  en `audit` con la vigencia anterior y la nueva.
+- `clientStatus()` cambia de criterio: sin fecha ya no es "vigente para
+  siempre" sino caducado. Ante un dato que la 019 prohíbe, se cierra la puerta.
+- 59/59 tests (2 nuevos sobre el contrato de alta y renovación).
+
 ### Supresión de cancelaciones huérfanas · `9fed5e5` · 29-jul-2026
 
 Decisión del operador sobre el pendiente que había quedado abierto en la 016.

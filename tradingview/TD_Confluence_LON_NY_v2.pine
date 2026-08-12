@@ -1,0 +1,724 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © PessaroCapital
+
+//@version=6
+indicator("TD Confluence Londres Nueva York v2.0", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=100)
+
+// ============================================================================
+//  TD CONFLUENCE LONDRES → NUEVA YORK V2.0 · SERVIDOR MULTI-SÍMBOLO
+//  ─────────────────────────────────────────────────────────────
+//  · Ventana continua: apertura de Londres → cierre de Nueva York
+//  · Impulso mínimo ADAPTATIVO por ATR (corrige la falta de señales en FX)
+//  · Servidor de webhooks: hasta 14 instrumentos desde UN solo gráfico
+//  · Varios trades por día con cooldown configurable
+//  · Perfiles automáticos: A JPY/Metales · B Oceanía · C Majors · D Índices/Energía
+//
+//  CÓMO ACTIVAR LOS WEBHOOKS DE TODA LA WATCHLIST:
+//  1) Coloca este indicador en UN gráfico cualquiera (ej. XAUUSD 15m)
+//  2) Configura los 14 slots del "Servidor Multi-Símbolo" con tu watchlist
+//  3) Crea UNA alerta: condición "Any alert() function call" + URL del webhook
+//  → Cada señal de cualquier símbolo llegará con su propio JSON.
+//  ⚠️ No agregues símbolos NO operables (VIX, USDT.D, TOTAL2).
+//  ⚠️ UNA sola alerta. Dos alertas sobre este indicador emiten el lote entero
+//     dos veces y, con el contrato v2.0, el dedup del bridge YA NO las tapa
+//     (ver §7).
+//
+// ============================================================================
+//  QUÉ CAMBIA RESPECTO DEL v1.x — CONTRATO v2.0 DEL BRIDGE
+//  ─────────────────────────────────────────────────────────────
+//
+//  C1 · FRESCURA ≠ DEDUP. `timestamp` pasa de `time` (apertura de la vela) a
+//       `timenow` (instante real de emisión) y la apertura de vela se manda
+//       aparte en `bar_time`. Con el valor viejo, un disparo intrabarra llegaba
+//       al bridge con hasta 897 s de "retraso" aparente y moría como `stale`:
+//       149 señales perdidas en el histórico auditado.
+//
+//  C2 · SE EMITE EL ARMADO. Hasta ahora el setup dibujado en el gráfico (la
+//       caja con ENTRADA / SL / TP1 / TP2) no salía del gráfico: solo se
+//       notificaba el DISPARO, cuando el precio ya había tocado el nivel y la
+//       orden límite ya no se podía colocar. Ahora el armado sale como
+//       SETUP_BUY / SETUP_SELL en el mismo instante en que se dibuja, y su
+//       retiro como SETUP_CANCEL. Son dos eventos distintos y ambos sirven:
+//         · armado  → "coloca la pendiente"
+//         · disparo → "el precio ya tocó tu nivel"
+//
+//  C3 · CALIDAD DE LA SEÑAL. `grade` (ELITE / STANDARD) e `impulse_atr` viajan
+//       en el JSON. El EA marca las ELITE con ★ y el panel del bridge las
+//       distingue. Se miden sobre el impulso que originó el setup, en unidades
+//       de ATR, así que son comparables entre instrumentos.
+//
+//  C4 · RIESGO POR INSTRUMENTO. `risk_usd` se calcula con el perfil del símbolo
+//       de CADA slot, no con el del gráfico anfitrión. Antes un slot de GBPUSD
+//       (perfil C, 0.75 %) reportaba el riesgo del gráfico XAUUSD (perfil A,
+//       0.5 %) y el EA recalculaba lotes sobre una cifra ajena.
+//
+//  LO QUE **NO** HACE ESTE INDICADOR, Y ES DELIBERADO:
+//  no filtra parejas de armado+cancelación efímeras ni cancelaciones huérfanas.
+//  Eso vive en el bridge (`setup_hold_seconds` y `suppress_orphan_cancels`,
+//  migraciones 016 y 018), que es la única capa que sabe si una señal llegó de
+//  verdad al terminal. Si el filtro viviera aquí, cada gráfico tendría su propia
+//  versión del criterio y el trader recibiría ruido distinto en cada terminal.
+// ============================================================================
+
+// ==========================================
+// 1. CONFIGURACIÓN GENERAL
+// ==========================================
+modoPerfil    = input.string("Automático (Multi-Instrumento)", title="🏆 Modo de Perfil", options=["Automático (Multi-Instrumento)", "Manual: Perfil A (JPY / Metales)", "Manual: Perfil B (Oceanía)", "Manual: Perfil C (Majors)", "Manual: Perfil D (Índices / Energía)"], group="💾 SETUP")
+spreadBroker  = input.float(3.0, title="💰 Spread del Bróker (Pips)", step=0.5, group="💾 SETUP")
+capitalCuenta = input.float(10000.0, title="💳 Balance de Cuenta ($ USD)", minval=1.0, group="💾 SETUP")
+valorPipLote  = input.float(10.0, title="💵 Valor del Pip por Lote Estándar ($)", minval=0.01, tooltip="≈ 10 USD por lote estándar en pares XXX/USD. El EA receptor debe recalcular por instrumento; los lotes del JSON son referenciales.", group="💾 SETUP")
+filtroCorrel  = input.bool(true, title="🛡️ Bloquear Correlación AUD/NZD (símbolo del gráfico)", group="💾 SETUP")
+
+// Gestión de la jornada Londres → NY
+maxTradesDia  = input.int(3, title="🎯 Máx. trades por día (por símbolo)", minval=1, maxval=10, group="🎯 GESTIÓN DE JORNADA")
+cooldownVelas = input.int(6, title="🧊 Cooldown entre señales (velas)", minval=0, maxval=50, group="🎯 GESTIÓN DE JORNADA")
+expiraVelas   = input.int(12, title="⏳ Expiración del setup (velas)", minval=3, maxval=50, group="🎯 GESTIÓN DE JORNADA")
+
+// Impulso mínimo — ADAPTATIVO (recomendado) o fijo
+modoImpulso  = input.string("Adaptativo (ATR volatilidad)", title="⚡ Modo de Impulso Mínimo", options=["Adaptativo (ATR volatilidad)", "Fijo (pips por perfil)"], tooltip="ADAPTATIVO: el impulso mínimo = ATR × multiplicador. Se autoajusta a la volatilidad de cada instrumento (soluciona la falta de señales en pares FX).", group="⚡ IMPULSO")
+multiATR     = input.float(1.2, title="   Multiplicador ATR", minval=0.3, maxval=5.0, step=0.1, group="⚡ IMPULSO")
+atrLen       = input.int(14, title="   Período ATR", minval=5, maxval=50, group="⚡ IMPULSO")
+minPipsFijo  = input.float(25.0, title="   Pips mínimos (solo modo Fijo)", minval=1.0, group="⚡ IMPULSO")
+umbralElite  = input.float(2.0, title="⭐ Umbral ELITE (impulso en ATR)", minval=0.5, maxval=10.0, step=0.1, tooltip="Un setup se marca ELITE cuando el impulso que lo originó mide al menos este múltiplo del ATR. Por debajo es STANDARD. Viaja en el JSON como `grade` y el EA lo muestra con ★.", group="⚡ IMPULSO")
+
+// Retrocesos Fibonacci editables por perfil
+fiboA = input.float(0.786, title="Fibo entrada · Perfil A (JPY/Metales)", minval=0.3, maxval=0.9, step=0.001, group="📐 FIBONACCI POR PERFIL")
+fiboB = input.float(0.618, title="Fibo entrada · Perfil B (Oceanía)", minval=0.3, maxval=0.9, step=0.001, group="📐 FIBONACCI POR PERFIL")
+fiboC = input.float(0.618, title="Fibo entrada · Perfil C (Majors)", minval=0.3, maxval=0.9, step=0.001, tooltip="Reducido de 0.705 → 0.618 para aumentar la tasa de llenado en EURUSD/GBPUSD.", group="📐 FIBONACCI POR PERFIL")
+fiboD = input.float(0.618, title="Fibo entrada · Perfil D (Índices/Energía)", minval=0.3, maxval=0.9, step=0.001, group="📐 FIBONACCI POR PERFIL")
+
+// Timeframe 3–15 minutos
+soloTFValido = input.bool(true, title="⏱️ Operar SOLO en TF de 3 a 15 minutos", group="⏱️ TIMEFRAME 3m–15m")
+
+// Sesión continua: apertura Londres → cierre Nueva York (hora de NY)
+sessionOper = input.session("0300-1600:23456", title="🌍 Ventana Operativa Londres → NY", tooltip="03:00 NY = apertura de Londres · 16:00 NY = cierre de Nueva York.", group="⏱️ HORARIO LONDRES → NUEVA YORK")
+useTimeZone = input.string("America/New_York", title="🌐 Zona Horaria", group="⏱️ HORARIO LONDRES → NUEVA YORK")
+sesLonVis   = input.session("0300-1130:23456", title="   🇬🇧 Sombreado visual Londres", group="⏱️ HORARIO LONDRES → NUEVA YORK")
+sesNYVis    = input.session("0800-1600:23456", title="   🇺🇸 Sombreado visual Nueva York", group="⏱️ HORARIO LONDRES → NUEVA YORK")
+
+mostrarMarcas = input.bool(true, title="🔔 Etiquetas de señal en el gráfico", group="🔔 NOTIFICACIONES")
+mostrarZonas  = input.bool(true, title="📦 Cajas de zona Riesgo / Beneficio", group="🔔 NOTIFICACIONES")
+
+// Emisión de eventos al bridge. Los tres van activos por defecto: el armado es
+// el aviso ÚTIL (todavía se puede colocar la pendiente) y la cancelación es lo
+// que evita que el trader deje colgada una orden que el sistema ya descartó.
+emitirSetups  = input.bool(true, title="📨 Emitir ARMADO del setup (SETUP_BUY / SETUP_SELL)", tooltip="El momento en que aparece la caja con ENTRADA/SL/TP1/TP2. Es el aviso accionable: la orden límite todavía se puede colocar.", group="🔔 NOTIFICACIONES")
+emitirCancels = input.bool(true, title="📨 Emitir RETIRO del setup (SETUP_CANCEL)", tooltip="Cuando un setup expira sin que el precio lo toque. El bridge decide si llega al terminal: las cancelaciones sin una entrada viva detrás se suprimen allí, no aquí.", group="🔔 NOTIFICACIONES")
+emitirTrigger = input.bool(true, title="📨 Emitir DISPARO (BUY_DUAL / SELL_DUAL)", tooltip="El precio tocó el nivel de entrada.", group="🔔 NOTIFICACIONES")
+
+// ── SERVIDOR MULTI-SÍMBOLO (webhooks de toda la watchlist) ──
+scan1  = input.bool(true,  title="Slot 1 activo",  group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s1")
+sym1   = input.symbol("OANDA:XAUUSD",   title="", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s1")
+scan2  = input.bool(true,  title="Slot 2 activo",  group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s2")
+sym2   = input.symbol("OANDA:XAGUSD",   title="", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s2")
+scan3  = input.bool(true,  title="Slot 3 activo",  group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s3")
+sym3   = input.symbol("TVC:USOIL",      title="", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s3")
+scan4  = input.bool(true,  title="Slot 4 activo",  group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s4")
+sym4   = input.symbol("CAPITALCOM:US30",  title="", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s4")
+scan5  = input.bool(true,  title="Slot 5 activo",  group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s5")
+sym5   = input.symbol("CAPITALCOM:US500", title="", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s5")
+scan6  = input.bool(true,  title="Slot 6 activo",  group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s6")
+sym6   = input.symbol("CAPITALCOM:US100", title="", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s6")
+scan7  = input.bool(true,  title="Slot 7 activo",  group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s7")
+sym7   = input.symbol("CAPITALCOM:DE40",  title="", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s7")
+scan8  = input.bool(true,  title="Slot 8 activo",  group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s8")
+sym8   = input.symbol("CAPITALCOM:UK100", title="", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s8")
+scan9  = input.bool(true,  title="Slot 9 activo",  group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s9")
+sym9   = input.symbol("FX:EURJPY",      title="", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s9")
+scan10 = input.bool(true,  title="Slot 10 activo", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s10")
+sym10  = input.symbol("FX:GBPUSD",      title="", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s10")
+scan11 = input.bool(true,  title="Slot 11 activo", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s11")
+sym11  = input.symbol("FX:EURUSD",      title="", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s11")
+scan12 = input.bool(true,  title="Slot 12 activo", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s12")
+sym12  = input.symbol("FX:AUDUSD",      title="", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s12")
+scan13 = input.bool(true,  title="Slot 13 activo", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s13")
+sym13  = input.symbol("FX:NZDUSD",      title="", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s13")
+scan14 = input.bool(true,  title="Slot 14 activo", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s14")
+sym14  = input.symbol("OANDA:GBPCAD",   title="", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s14")
+
+// Interfaz
+themeColor = input.string("Dorado Elite", title="🎨 Tema del Dashboard", options=["Dorado Elite", "Oscuro / Cyberpunk", "Azul Naval"], group="🎨 INTERFAZ VISUAL")
+dashPos    = input.string("Superior Derecha", title="📍 Posición del Dashboard", options=["Superior Derecha", "Superior Izquierda", "Inferior Derecha", "Inferior Izquierda"], group="🎨 INTERFAZ VISUAL")
+
+// ==========================================
+// 2. TIMEFRAME, PERFIL Y CONSTANTES
+//    (todo se re-evalúa por símbolo dentro de request.security)
+// ==========================================
+float tfMinutos = timeframe.in_seconds() / 60.0
+bool  tfValido  = tfMinutos >= 3 and tfMinutos <= 15
+bool  tfOK      = not soloTFValido or tfValido
+float factorTF  = math.sqrt(tfMinutos / 5.0)
+
+float pipSize        = syminfo.mintick * 10
+float spreadEnPrecio = spreadBroker * pipSize
+float bufferEntrada  = 2.0 * pipSize
+float atrValor       = ta.atr(atrLen)
+
+f_perfilAuto() =>
+    string t = str.upper(syminfo.ticker)
+    bool esMetal   = str.contains(t, "XAU") or str.contains(t, "GOLD") or str.contains(t, "XAG") or str.contains(t, "SILVER")
+    bool esJPY     = syminfo.currency == "JPY" or str.contains(t, "JPY")
+    bool esOceania = str.contains(t, "AUD") or str.contains(t, "NZD")
+    bool esIndiceEnergia = syminfo.type == "index" or str.contains(t, "US30") or str.contains(t, "US500") or str.contains(t, "SP500") or str.contains(t, "SPX") or str.contains(t, "US100") or str.contains(t, "NAS") or str.contains(t, "US2000") or str.contains(t, "DE40") or str.contains(t, "DAX") or str.contains(t, "UK100") or str.contains(t, "FTSE") or str.contains(t, "JP225") or str.contains(t, "NIKKEI") or str.contains(t, "HK50") or str.contains(t, "SX5E") or str.contains(t, "OIL") or str.contains(t, "WTI") or str.contains(t, "BRENT")
+    (esMetal or esJPY) ? "A" : esOceania ? "B" : esIndiceEnergia ? "D" : "C"
+
+string perfilActivo = modoPerfil == "Automático (Multi-Instrumento)" ? f_perfilAuto() : modoPerfil == "Manual: Perfil A (JPY / Metales)" ? "A" : modoPerfil == "Manual: Perfil B (Oceanía)" ? "B" : modoPerfil == "Manual: Perfil C (Majors)" ? "C" : "D"
+
+float fiboEntrada   = perfilActivo == "A" ? fiboA : perfilActivo == "B" ? fiboB : perfilActivo == "C" ? fiboC : fiboD
+float fiboTP2       = perfilActivo == "A" ? 0.618 : perfilActivo == "B" ? 0.27 : 0.5
+int   ticksSL       = perfilActivo == "A" ? 6 : perfilActivo == "B" ? 4 : 5
+float pctRiesgo     = perfilActivo == "A" ? 0.005 : perfilActivo == "B" ? 0.010 : perfilActivo == "C" ? 0.0075 : 0.005
+float multiPerfil   = perfilActivo == "A" ? 1.15 : perfilActivo == "B" ? 0.90 : perfilActivo == "C" ? 1.00 : 1.05
+string nombrePerfil = perfilActivo == "A" ? "A · JPY/Metales" : perfilActivo == "B" ? "B · Oceanía" : perfilActivo == "C" ? "C · Majors" : "D · Índices/Energía"
+
+// Impulso mínimo en PRECIO: adaptativo (ATR) o fijo (pips)
+float minImpulso = modoImpulso == "Adaptativo (ATR volatilidad)" ? atrValor * multiATR * multiPerfil : minPipsFijo * factorTF * pipSize
+
+// ==========================================
+// 3. MOTOR TD + FIBONACCI (función autónoma)
+//    Devuelve: [señal, estado, entrada, sl, tp1, tp2, lote1, lote2,
+//               tradesHoy, eventoSetup, impulsoATR, riesgoUSD]
+//    señal:       1 buy · -1 sell · 2 retiro del setup · 0 nada
+//    estado:      ±3 señal · 4 máx. trades · ±2 setup · ±1 impulso · 0 nada
+//    eventoSetup:  2 armado long · -2 armado short · 0 nada  (SOLO en el flanco)
+//    impulsoATR:  tamaño del impulso que originó el setup, en múltiplos de ATR
+//    riesgoUSD:   riesgo del perfil de ESTE símbolo (C4), no el del gráfico
+// ==========================================
+f_engine(bool bloqueado) =>
+    var float ini         = na
+    var float fin         = na
+    var int   dir         = 0
+    var int   velaAct     = na
+    var int   tradesHoy   = 0
+    var int   ultimaSenal = na
+
+    // Estado del contrato v2.0. `dirPrev` da la detección de FLANCO del armado y
+    // `impAtrArm` sobrevive al reset de `dir` del paso 5 — sin `var` el disparo
+    // que ocurre en la misma vela que el armado reportaría impulso 0.
+    var int   dirPrev     = 0
+    var float impAtrArm   = 0.0
+
+    bool ventana  = not na(time(timeframe.period, sessionOper, useTimeZone))
+    bool nuevoDia = time("D") != time("D")[1]
+
+    if nuevoDia
+        tradesHoy := 0
+        dir       := 0
+        velaAct   := na
+    if not ventana
+        dir     := 0
+        velaAct := na
+
+    bool tdDemand = low[2] < low[1] and low[2] < low[3] and low[2] < low and low[2] < low[4]
+    bool tdSupply = high[2] > high[1] and high[2] > high[3] and high[2] > high and high[2] > high[4]
+
+    bool cooldownOK  = na(ultimaSenal) or (bar_index - ultimaSenal >= cooldownVelas)
+    bool puedeOperar = ventana and tradesHoy < maxTradesDia and not bloqueado and tfOK and cooldownOK
+
+    // 1) Completar impulsos pendientes
+    if tdSupply and dir == 1 and puedeOperar
+        fin := high[2]
+        if (fin - ini) >= minImpulso
+            dir     := 2
+            velaAct := bar_index
+        else
+            dir := 0
+    if tdDemand and dir == -1 and puedeOperar
+        fin := low[2]
+        if (ini - fin) >= minImpulso
+            dir     := -2
+            velaAct := bar_index
+        else
+            dir := 0
+
+    // 2) Iniciar / actualizar impulsos (sin destruir un setup activo ±2)
+    if tdDemand and puedeOperar and (dir == 0 or dir == 1)
+        ini := low[2]
+        dir := 1
+    if tdSupply and puedeOperar and (dir == 0 or dir == -1)
+        ini := high[2]
+        dir := -1
+
+    // 3) Niveles Fibonacci
+    float entrada = na
+    float sl      = na
+    float tp1     = na
+    float tp2     = na
+    if dir == 2
+        float rango = fin - ini
+        entrada := fin - rango * fiboEntrada + bufferEntrada
+        sl      := ini - spreadEnPrecio - ticksSL * syminfo.mintick
+        tp1     := fin
+        tp2     := fin + rango * fiboTP2
+    if dir == -2
+        float rango = ini - fin
+        entrada := fin + rango * fiboEntrada - bufferEntrada
+        sl      := ini + spreadEnPrecio + ticksSL * syminfo.mintick
+        tp1     := fin
+        tp2     := fin - rango * fiboTP2
+
+    // 4) Lotes 60/40 (referenciales; el EA debe recalcular por instrumento)
+    float distPips = math.abs(entrada - sl) / pipSize
+    float riesgo   = capitalCuenta * pctRiesgo
+    float lotes    = distPips > 0 ? riesgo / (distPips * valorPipLote) : 0.0
+    lotes := math.max(0.02, math.round(lotes, 2))
+    float l1 = math.max(0.01, math.round(lotes * 0.60, 2))
+    float l2 = math.max(0.01, math.round(lotes * 0.40, 2))
+
+    // 4.b) FLANCO DE ARMADO (C2)
+    //
+    // Sin la comparación contra `dirPrev` el armado se reemitiría en CADA vela
+    // mientras `dir` siguiera en ±2: el trader recibiría el mismo setup una vez
+    // por vela hasta que expirara. El evento es la transición, no el estado.
+    bool armadoNuevo = (dir == 2 or dir == -2) and dirPrev != dir
+    if armadoNuevo
+        float recorrido = math.abs(fin - ini)
+        impAtrArm := atrValor > 0 ? recorrido / atrValor : 0.0
+    int eventoSetup = armadoNuevo ? dir : 0
+
+    // 5) Gatillos y expiración
+    bool trigCompra = dir == 2 and low <= entrada and close > sl and puedeOperar
+    bool trigVenta  = dir == -2 and high >= entrada and close < sl and puedeOperar
+    bool expirado   = not na(velaAct) and (dir == 2 or dir == -2) and (bar_index - velaAct > expiraVelas) and not trigCompra and not trigVenta
+
+    if trigCompra or trigVenta
+        tradesHoy   += 1
+        ultimaSenal := bar_index
+        dir         := 0
+        velaAct     := na
+    if expirado
+        dir     := 0
+        velaAct := na
+
+    int senal  = trigCompra ? 1 : trigVenta ? -1 : expirado ? 2 : 0
+    int estado = trigCompra ? 3 : trigVenta ? -3 : tradesHoy >= maxTradesDia ? 4 : dir
+
+    // `dirPrev` se actualiza AL FINAL, después de que el paso 5 pudo resetear
+    // `dir`. Adelantarlo rompe la detección de flanco: es el mismo error de
+    // orden de bloques que produjo el bug histórico B3.
+    dirPrev := dir
+
+    [senal, estado, entrada, sl, tp1, tp2, l1, l2, tradesHoy, eventoSetup, impAtrArm, riesgo]
+
+// ==========================================
+// 4. CORRELACIÓN AUD/NZD (símbolo del gráfico)
+// ==========================================
+f_hermanoOpero() =>
+    [_s, _e, _en, _sl, _t1, _t2, _l1, _l2, th, _ev, _ia, _r] = f_engine(false)
+    th > 0
+
+bool esParCorrel = syminfo.ticker == "AUDUSD" or syminfo.ticker == "NZDUSD"
+string tickerHermano = syminfo.ticker == "AUDUSD" ? "FX:NZDUSD" : syminfo.ticker == "NZDUSD" ? "FX:AUDUSD" : syminfo.tickerid
+bool hermanoDisparado = request.security(tickerHermano, timeframe.period, f_hermanoOpero(), barmerge.gaps_off, barmerge.lookahead_off)
+bool bloqueoPorCorrelacion = filtroCorrel and esParCorrel and hermanoDisparado
+
+// ==========================================
+// 5. MOTOR EN EL SÍMBOLO DEL GRÁFICO
+// ==========================================
+[senalG, estadoG, nivelEntrada, nivelSL, nivelTP1, nivelTP2, loteTP1, loteTP2, tradesHoyG, eventoSetupG, impAtrG, riesgoG] = f_engine(bloqueoPorCorrelacion)
+
+bool ventanaPermitida = not na(time(timeframe.period, sessionOper, useTimeZone))
+bool visLon = not na(time(timeframe.period, sesLonVis, useTimeZone))
+bool visNY  = not na(time(timeframe.period, sesNYVis, useTimeZone))
+
+float distSLPips = math.abs(nivelEntrada - nivelSL) / pipSize
+float rr1 = distSLPips > 0 ? math.abs(nivelTP1 - nivelEntrada) / math.abs(nivelEntrada - nivelSL) : na
+float rr2 = distSLPips > 0 ? math.abs(nivelTP2 - nivelEntrada) / math.abs(nivelEntrada - nivelSL) : na
+
+// ==========================================
+// 6. SERVIDOR MULTI-SÍMBOLO (motor en cada slot vía request.security)
+// ==========================================
+f_slot() =>
+    [s, e, en, sl_, t1, t2, l1, l2, _th, ev, ia, r] = f_engine(false)
+    [s, e, en, sl_, t1, t2, l1, l2, ev, ia, r]
+
+[sen1,  est1,  pre1,  stp1,  tpA1,  tpB1,  ltA1,  ltB1,  evt1,  imp1,  rsk1]  = request.security(sym1,  timeframe.period, f_slot(), barmerge.gaps_off, barmerge.lookahead_off)
+[sen2,  est2,  pre2,  stp2,  tpA2,  tpB2,  ltA2,  ltB2,  evt2,  imp2,  rsk2]  = request.security(sym2,  timeframe.period, f_slot(), barmerge.gaps_off, barmerge.lookahead_off)
+[sen3,  est3,  pre3,  stp3,  tpA3,  tpB3,  ltA3,  ltB3,  evt3,  imp3,  rsk3]  = request.security(sym3,  timeframe.period, f_slot(), barmerge.gaps_off, barmerge.lookahead_off)
+[sen4,  est4,  pre4,  stp4,  tpA4,  tpB4,  ltA4,  ltB4,  evt4,  imp4,  rsk4]  = request.security(sym4,  timeframe.period, f_slot(), barmerge.gaps_off, barmerge.lookahead_off)
+[sen5,  est5,  pre5,  stp5,  tpA5,  tpB5,  ltA5,  ltB5,  evt5,  imp5,  rsk5]  = request.security(sym5,  timeframe.period, f_slot(), barmerge.gaps_off, barmerge.lookahead_off)
+[sen6,  est6,  pre6,  stp6,  tpA6,  tpB6,  ltA6,  ltB6,  evt6,  imp6,  rsk6]  = request.security(sym6,  timeframe.period, f_slot(), barmerge.gaps_off, barmerge.lookahead_off)
+[sen7,  est7,  pre7,  stp7,  tpA7,  tpB7,  ltA7,  ltB7,  evt7,  imp7,  rsk7]  = request.security(sym7,  timeframe.period, f_slot(), barmerge.gaps_off, barmerge.lookahead_off)
+[sen8,  est8,  pre8,  stp8,  tpA8,  tpB8,  ltA8,  ltB8,  evt8,  imp8,  rsk8]  = request.security(sym8,  timeframe.period, f_slot(), barmerge.gaps_off, barmerge.lookahead_off)
+[sen9,  est9,  pre9,  stp9,  tpA9,  tpB9,  ltA9,  ltB9,  evt9,  imp9,  rsk9]  = request.security(sym9,  timeframe.period, f_slot(), barmerge.gaps_off, barmerge.lookahead_off)
+[sen10, est10, pre10, stp10, tpA10, tpB10, ltA10, ltB10, evt10, imp10, rsk10] = request.security(sym10, timeframe.period, f_slot(), barmerge.gaps_off, barmerge.lookahead_off)
+[sen11, est11, pre11, stp11, tpA11, tpB11, ltA11, ltB11, evt11, imp11, rsk11] = request.security(sym11, timeframe.period, f_slot(), barmerge.gaps_off, barmerge.lookahead_off)
+[sen12, est12, pre12, stp12, tpA12, tpB12, ltA12, ltB12, evt12, imp12, rsk12] = request.security(sym12, timeframe.period, f_slot(), barmerge.gaps_off, barmerge.lookahead_off)
+[sen13, est13, pre13, stp13, tpA13, tpB13, ltA13, ltB13, evt13, imp13, rsk13] = request.security(sym13, timeframe.period, f_slot(), barmerge.gaps_off, barmerge.lookahead_off)
+[sen14, est14, pre14, stp14, tpA14, tpB14, ltA14, ltB14, evt14, imp14, rsk14] = request.security(sym14, timeframe.period, f_slot(), barmerge.gaps_off, barmerge.lookahead_off)
+
+// ==========================================
+// 7. CONSTRUCCIÓN DE JSON Y ALERTAS WEBHOOK — CONTRATO v2.0
+//
+//  · `bar_time`  = apertura de la vela  → clave de DEDUPLICACIÓN en el bridge
+//  · `timestamp` = timenow              → mide FRESCURA (C1)
+//
+//  Los dos campos existen porque cumplían fines incompatibles con un solo
+//  valor: con `timestamp` = apertura de vela, un disparo intrabarra llegaba
+//  "viejo" y el bridge lo mataba como stale; con `timestamp` = timenow a secas,
+//  cada reemisión del mismo evento traería un valor distinto en milisegundos y
+//  pasaría el dedup.
+//
+//  ⚠️ DE AQUÍ SALE LA REGLA DE "UNA SOLA ALERTA" DE LA CABECERA. Mientras
+//  `timestamp` fue la apertura de vela, dos alertas duplicadas emitían el mismo
+//  valor y el índice de dedup las frenaba. Con el contrato v2.0 el dedup va por
+//  `bar_time`, que sigue tapándolas — pero cualquier alerta extra ya no aporta
+//  nada y consume cupo de la cuenta de TradingView. Deja UNA sola.
+// ==========================================
+f_nombreCorto(string s) =>
+    array<string> partes = str.split(s, ":")
+    array.get(partes, array.size(partes) - 1)
+
+f_grade(float impAtr) =>
+    impAtr >= umbralElite ? "ELITE" : "STANDARD"
+
+// Entradas: armado (SETUP_*) y disparo (*_DUAL) comparten forma completa.
+// `nz()` en cada número no es decorativo: un `na` se serializaría como "NaN",
+// que no es JSON válido, y el bridge rechazaría el payload entero por esquema.
+f_json(string accion, string simbolo, float impAtr, float en, float sl_, float t1, float t2, float l1, float l2, float riesgo) =>
+    '{"schema":"2.0"'
+      + ',"account_id":"TD_CONF_LON_NY"'
+      + ',"action":"' + accion + '"'
+      + ',"symbol":"' + simbolo + '"'
+      + ',"tf":"' + timeframe.period + '"'
+      + ',"type":"LIMIT"'
+      + ',"grade":"' + f_grade(nz(impAtr)) + '"'
+      + ',"impulse_atr":' + str.tostring(nz(impAtr))
+      + ',"price":' + str.tostring(nz(en))
+      + ',"sl":' + str.tostring(nz(sl_))
+      + ',"partial_1":{"lots":' + str.tostring(nz(l1)) + ',"tp":' + str.tostring(nz(t1)) + '}'
+      + ',"partial_2":{"lots":' + str.tostring(nz(l2)) + ',"tp":' + str.tostring(nz(t2)) + '}'
+      + ',"risk_usd":' + str.tostring(nz(riesgo))
+      + ',"bar_time":' + str.tostring(time)
+      + ',"timestamp":' + str.tostring(timenow)
+      + '}'
+
+// Retiros: forma reducida, sin niveles. No hay nada que colocar.
+f_jsonCancel(string accion, string simbolo) =>
+    '{"schema":"2.0"'
+      + ',"account_id":"TD_CONF_LON_NY"'
+      + ',"action":"' + accion + '"'
+      + ',"symbol":"' + simbolo + '"'
+      + ',"tf":"' + timeframe.period + '"'
+      + ',"bar_time":' + str.tostring(time)
+      + ',"timestamp":' + str.tostring(timenow)
+      + '}'
+
+// Nombre corto de cada slot, resuelto UNA vez por vela.
+//
+// `f_nombreCorto` hace `str.split`, que asigna un array nuevo en cada llamada.
+// Antes se llamaba dentro de cada emisión; con tres eventos posibles por slot
+// serían hasta 42 arrays por vela para un dato que no cambia nunca (los `sym*`
+// son inputs constantes).
+string nom1  = f_nombreCorto(sym1)
+string nom2  = f_nombreCorto(sym2)
+string nom3  = f_nombreCorto(sym3)
+string nom4  = f_nombreCorto(sym4)
+string nom5  = f_nombreCorto(sym5)
+string nom6  = f_nombreCorto(sym6)
+string nom7  = f_nombreCorto(sym7)
+string nom8  = f_nombreCorto(sym8)
+string nom9  = f_nombreCorto(sym9)
+string nom10 = f_nombreCorto(sym10)
+string nom11 = f_nombreCorto(sym11)
+string nom12 = f_nombreCorto(sym12)
+string nom13 = f_nombreCorto(sym13)
+string nom14 = f_nombreCorto(sym14)
+
+// El símbolo del gráfico se excluye de los slots para evitar alertas duplicadas
+// (el §7 de abajo ya lo emite por su cuenta con el motor del gráfico).
+
+// ── Emisión de los 14 slots ──
+//
+// Armado y disparo pueden coincidir en la MISMA vela (el setup se arma y el
+// precio toca el nivel antes de que cierre). Por eso son dos `alert()`
+// independientes y no un `else`: son dos hechos ciertos y el EA los distingue
+// (◇ armado / ◆ disparo).
+if scan1 and nom1 != syminfo.ticker
+    if emitirSetups and evt1 != 0
+        alert(f_json(evt1 == 2 ? "SETUP_BUY" : "SETUP_SELL", nom1, imp1, pre1, stp1, tpA1, tpB1, ltA1, ltB1, rsk1), alert.freq_once_per_bar)
+    if emitirTrigger and (sen1 == 1 or sen1 == -1)
+        alert(f_json(sen1 == 1 ? "BUY_DUAL" : "SELL_DUAL", nom1, imp1, pre1, stp1, tpA1, tpB1, ltA1, ltB1, rsk1), alert.freq_once_per_bar)
+    if emitirCancels and sen1 == 2
+        alert(f_jsonCancel("SETUP_CANCEL", nom1), alert.freq_once_per_bar)
+
+if scan2 and nom2 != syminfo.ticker
+    if emitirSetups and evt2 != 0
+        alert(f_json(evt2 == 2 ? "SETUP_BUY" : "SETUP_SELL", nom2, imp2, pre2, stp2, tpA2, tpB2, ltA2, ltB2, rsk2), alert.freq_once_per_bar)
+    if emitirTrigger and (sen2 == 1 or sen2 == -1)
+        alert(f_json(sen2 == 1 ? "BUY_DUAL" : "SELL_DUAL", nom2, imp2, pre2, stp2, tpA2, tpB2, ltA2, ltB2, rsk2), alert.freq_once_per_bar)
+    if emitirCancels and sen2 == 2
+        alert(f_jsonCancel("SETUP_CANCEL", nom2), alert.freq_once_per_bar)
+
+if scan3 and nom3 != syminfo.ticker
+    if emitirSetups and evt3 != 0
+        alert(f_json(evt3 == 2 ? "SETUP_BUY" : "SETUP_SELL", nom3, imp3, pre3, stp3, tpA3, tpB3, ltA3, ltB3, rsk3), alert.freq_once_per_bar)
+    if emitirTrigger and (sen3 == 1 or sen3 == -1)
+        alert(f_json(sen3 == 1 ? "BUY_DUAL" : "SELL_DUAL", nom3, imp3, pre3, stp3, tpA3, tpB3, ltA3, ltB3, rsk3), alert.freq_once_per_bar)
+    if emitirCancels and sen3 == 2
+        alert(f_jsonCancel("SETUP_CANCEL", nom3), alert.freq_once_per_bar)
+
+if scan4 and nom4 != syminfo.ticker
+    if emitirSetups and evt4 != 0
+        alert(f_json(evt4 == 2 ? "SETUP_BUY" : "SETUP_SELL", nom4, imp4, pre4, stp4, tpA4, tpB4, ltA4, ltB4, rsk4), alert.freq_once_per_bar)
+    if emitirTrigger and (sen4 == 1 or sen4 == -1)
+        alert(f_json(sen4 == 1 ? "BUY_DUAL" : "SELL_DUAL", nom4, imp4, pre4, stp4, tpA4, tpB4, ltA4, ltB4, rsk4), alert.freq_once_per_bar)
+    if emitirCancels and sen4 == 2
+        alert(f_jsonCancel("SETUP_CANCEL", nom4), alert.freq_once_per_bar)
+
+if scan5 and nom5 != syminfo.ticker
+    if emitirSetups and evt5 != 0
+        alert(f_json(evt5 == 2 ? "SETUP_BUY" : "SETUP_SELL", nom5, imp5, pre5, stp5, tpA5, tpB5, ltA5, ltB5, rsk5), alert.freq_once_per_bar)
+    if emitirTrigger and (sen5 == 1 or sen5 == -1)
+        alert(f_json(sen5 == 1 ? "BUY_DUAL" : "SELL_DUAL", nom5, imp5, pre5, stp5, tpA5, tpB5, ltA5, ltB5, rsk5), alert.freq_once_per_bar)
+    if emitirCancels and sen5 == 2
+        alert(f_jsonCancel("SETUP_CANCEL", nom5), alert.freq_once_per_bar)
+
+if scan6 and nom6 != syminfo.ticker
+    if emitirSetups and evt6 != 0
+        alert(f_json(evt6 == 2 ? "SETUP_BUY" : "SETUP_SELL", nom6, imp6, pre6, stp6, tpA6, tpB6, ltA6, ltB6, rsk6), alert.freq_once_per_bar)
+    if emitirTrigger and (sen6 == 1 or sen6 == -1)
+        alert(f_json(sen6 == 1 ? "BUY_DUAL" : "SELL_DUAL", nom6, imp6, pre6, stp6, tpA6, tpB6, ltA6, ltB6, rsk6), alert.freq_once_per_bar)
+    if emitirCancels and sen6 == 2
+        alert(f_jsonCancel("SETUP_CANCEL", nom6), alert.freq_once_per_bar)
+
+if scan7 and nom7 != syminfo.ticker
+    if emitirSetups and evt7 != 0
+        alert(f_json(evt7 == 2 ? "SETUP_BUY" : "SETUP_SELL", nom7, imp7, pre7, stp7, tpA7, tpB7, ltA7, ltB7, rsk7), alert.freq_once_per_bar)
+    if emitirTrigger and (sen7 == 1 or sen7 == -1)
+        alert(f_json(sen7 == 1 ? "BUY_DUAL" : "SELL_DUAL", nom7, imp7, pre7, stp7, tpA7, tpB7, ltA7, ltB7, rsk7), alert.freq_once_per_bar)
+    if emitirCancels and sen7 == 2
+        alert(f_jsonCancel("SETUP_CANCEL", nom7), alert.freq_once_per_bar)
+
+if scan8 and nom8 != syminfo.ticker
+    if emitirSetups and evt8 != 0
+        alert(f_json(evt8 == 2 ? "SETUP_BUY" : "SETUP_SELL", nom8, imp8, pre8, stp8, tpA8, tpB8, ltA8, ltB8, rsk8), alert.freq_once_per_bar)
+    if emitirTrigger and (sen8 == 1 or sen8 == -1)
+        alert(f_json(sen8 == 1 ? "BUY_DUAL" : "SELL_DUAL", nom8, imp8, pre8, stp8, tpA8, tpB8, ltA8, ltB8, rsk8), alert.freq_once_per_bar)
+    if emitirCancels and sen8 == 2
+        alert(f_jsonCancel("SETUP_CANCEL", nom8), alert.freq_once_per_bar)
+
+if scan9 and nom9 != syminfo.ticker
+    if emitirSetups and evt9 != 0
+        alert(f_json(evt9 == 2 ? "SETUP_BUY" : "SETUP_SELL", nom9, imp9, pre9, stp9, tpA9, tpB9, ltA9, ltB9, rsk9), alert.freq_once_per_bar)
+    if emitirTrigger and (sen9 == 1 or sen9 == -1)
+        alert(f_json(sen9 == 1 ? "BUY_DUAL" : "SELL_DUAL", nom9, imp9, pre9, stp9, tpA9, tpB9, ltA9, ltB9, rsk9), alert.freq_once_per_bar)
+    if emitirCancels and sen9 == 2
+        alert(f_jsonCancel("SETUP_CANCEL", nom9), alert.freq_once_per_bar)
+
+if scan10 and nom10 != syminfo.ticker
+    if emitirSetups and evt10 != 0
+        alert(f_json(evt10 == 2 ? "SETUP_BUY" : "SETUP_SELL", nom10, imp10, pre10, stp10, tpA10, tpB10, ltA10, ltB10, rsk10), alert.freq_once_per_bar)
+    if emitirTrigger and (sen10 == 1 or sen10 == -1)
+        alert(f_json(sen10 == 1 ? "BUY_DUAL" : "SELL_DUAL", nom10, imp10, pre10, stp10, tpA10, tpB10, ltA10, ltB10, rsk10), alert.freq_once_per_bar)
+    if emitirCancels and sen10 == 2
+        alert(f_jsonCancel("SETUP_CANCEL", nom10), alert.freq_once_per_bar)
+
+if scan11 and nom11 != syminfo.ticker
+    if emitirSetups and evt11 != 0
+        alert(f_json(evt11 == 2 ? "SETUP_BUY" : "SETUP_SELL", nom11, imp11, pre11, stp11, tpA11, tpB11, ltA11, ltB11, rsk11), alert.freq_once_per_bar)
+    if emitirTrigger and (sen11 == 1 or sen11 == -1)
+        alert(f_json(sen11 == 1 ? "BUY_DUAL" : "SELL_DUAL", nom11, imp11, pre11, stp11, tpA11, tpB11, ltA11, ltB11, rsk11), alert.freq_once_per_bar)
+    if emitirCancels and sen11 == 2
+        alert(f_jsonCancel("SETUP_CANCEL", nom11), alert.freq_once_per_bar)
+
+if scan12 and nom12 != syminfo.ticker
+    if emitirSetups and evt12 != 0
+        alert(f_json(evt12 == 2 ? "SETUP_BUY" : "SETUP_SELL", nom12, imp12, pre12, stp12, tpA12, tpB12, ltA12, ltB12, rsk12), alert.freq_once_per_bar)
+    if emitirTrigger and (sen12 == 1 or sen12 == -1)
+        alert(f_json(sen12 == 1 ? "BUY_DUAL" : "SELL_DUAL", nom12, imp12, pre12, stp12, tpA12, tpB12, ltA12, ltB12, rsk12), alert.freq_once_per_bar)
+    if emitirCancels and sen12 == 2
+        alert(f_jsonCancel("SETUP_CANCEL", nom12), alert.freq_once_per_bar)
+
+if scan13 and nom13 != syminfo.ticker
+    if emitirSetups and evt13 != 0
+        alert(f_json(evt13 == 2 ? "SETUP_BUY" : "SETUP_SELL", nom13, imp13, pre13, stp13, tpA13, tpB13, ltA13, ltB13, rsk13), alert.freq_once_per_bar)
+    if emitirTrigger and (sen13 == 1 or sen13 == -1)
+        alert(f_json(sen13 == 1 ? "BUY_DUAL" : "SELL_DUAL", nom13, imp13, pre13, stp13, tpA13, tpB13, ltA13, ltB13, rsk13), alert.freq_once_per_bar)
+    if emitirCancels and sen13 == 2
+        alert(f_jsonCancel("SETUP_CANCEL", nom13), alert.freq_once_per_bar)
+
+if scan14 and nom14 != syminfo.ticker
+    if emitirSetups and evt14 != 0
+        alert(f_json(evt14 == 2 ? "SETUP_BUY" : "SETUP_SELL", nom14, imp14, pre14, stp14, tpA14, tpB14, ltA14, ltB14, rsk14), alert.freq_once_per_bar)
+    if emitirTrigger and (sen14 == 1 or sen14 == -1)
+        alert(f_json(sen14 == 1 ? "BUY_DUAL" : "SELL_DUAL", nom14, imp14, pre14, stp14, tpA14, tpB14, ltA14, ltB14, rsk14), alert.freq_once_per_bar)
+    if emitirCancels and sen14 == 2
+        alert(f_jsonCancel("SETUP_CANCEL", nom14), alert.freq_once_per_bar)
+
+// ── Alertas del símbolo del gráfico ──
+var string logHistorial = "ESPERANDO CONFLUENCIA"
+bool inicioVentana = ventanaPermitida and not ventanaPermitida[1]
+
+if inicioVentana
+    logHistorial := "ESPERANDO CONFLUENCIA"
+if bloqueoPorCorrelacion and ventanaPermitida
+    logHistorial := "BLOQUEO CORRELACIÓN 🛡️"
+if soloTFValido and not tfValido
+    logHistorial := "TF FUERA DE RANGO 3–15m ⚠️"
+
+// ARMADO — el aviso accionable: la pendiente todavía se puede colocar.
+if eventoSetupG != 0
+    logHistorial := (eventoSetupG == 2 ? "SETUP LONG ARMADO ◇" : "SETUP SHORT ARMADO ◇") + " " + f_grade(impAtrG)
+    if emitirSetups
+        alert(f_json(eventoSetupG == 2 ? "SETUP_BUY" : "SETUP_SELL", syminfo.ticker, impAtrG, nivelEntrada, nivelSL, nivelTP1, nivelTP2, loteTP1, loteTP2, riesgoG), alert.freq_once_per_bar)
+
+if senalG == 1
+    logHistorial := "BUY DISPARADO 📈 (#" + str.tostring(tradesHoyG) + " hoy)"
+    if emitirTrigger
+        alert(f_json("BUY_DUAL", syminfo.ticker, impAtrG, nivelEntrada, nivelSL, nivelTP1, nivelTP2, loteTP1, loteTP2, riesgoG), alert.freq_once_per_bar)
+    if mostrarMarcas
+        label.new(bar_index, low, "BUY LIMIT\n" + str.tostring(nivelEntrada, format.mintick), style=label.style_label_up, color=color.new(#00c853, 0), textcolor=color.white, size=size.small)
+
+if senalG == -1
+    logHistorial := "SELL DISPARADO 📉 (#" + str.tostring(tradesHoyG) + " hoy)"
+    if emitirTrigger
+        alert(f_json("SELL_DUAL", syminfo.ticker, impAtrG, nivelEntrada, nivelSL, nivelTP1, nivelTP2, loteTP1, loteTP2, riesgoG), alert.freq_once_per_bar)
+    if mostrarMarcas
+        label.new(bar_index, high, "SELL LIMIT\n" + str.tostring(nivelEntrada, format.mintick), style=label.style_label_down, color=color.new(#d50000, 0), textcolor=color.white, size=size.small)
+
+if senalG == 2
+    logHistorial := "SETUP RETIRADO POR TIEMPO ⏳"
+    if emitirCancels
+        alert(f_jsonCancel("SETUP_CANCEL", syminfo.ticker), alert.freq_once_per_bar)
+
+// ==========================================
+// 8. VISUALIZACIÓN EN GRÁFICO
+// ==========================================
+bool tdDemandPlot = low[2] < low[1] and low[2] < low[3] and low[2] < low and low[2] < low[4]
+bool tdSupplyPlot = high[2] > high[1] and high[2] > high[3] and high[2] > high and high[2] > high[4]
+
+plotshape(tdDemandPlot, title="TD Demand Point", style=shape.triangleup, location=location.belowbar, color=color.new(#00ffcc, 30), size=size.tiny, offset=-2)
+plotshape(tdSupplyPlot, title="TD Supply Point", style=shape.triangledown, location=location.abovebar, color=color.new(#ff5252, 30), size=size.tiny, offset=-2)
+
+bool setupActivo = (estadoG == 2 or estadoG == -2) and not na(nivelEntrada)
+
+var line  lnEntrada = na
+var line  lnSL      = na
+var line  lnTP1     = na
+var line  lnTP2     = na
+var label lbEntrada = na
+var label lbSL      = na
+var label lbTP1     = na
+var label lbTP2     = na
+var box   bxRiesgo  = na
+var box   bxProfit  = na
+
+if barstate.islast
+    line.delete(lnEntrada)
+    line.delete(lnSL)
+    line.delete(lnTP1)
+    line.delete(lnTP2)
+    label.delete(lbEntrada)
+    label.delete(lbSL)
+    label.delete(lbTP1)
+    label.delete(lbTP2)
+    box.delete(bxRiesgo)
+    box.delete(bxProfit)
+    if setupActivo
+        int x1 = bar_index - 12
+        int x2 = bar_index + 6
+        if mostrarZonas
+            bxRiesgo := box.new(x1, math.max(nivelEntrada, nivelSL), x2, math.min(nivelEntrada, nivelSL), border_color=color.new(#ff5252, 70), bgcolor=color.new(#ff5252, 88))
+            bxProfit := box.new(x1, math.max(nivelEntrada, nivelTP2), x2, math.min(nivelEntrada, nivelTP2), border_color=color.new(#00e676, 70), bgcolor=color.new(#00e676, 90))
+        lnEntrada := line.new(x1, nivelEntrada, x2, nivelEntrada, color=#00ffcc, style=line.style_dashed, width=2)
+        lnSL      := line.new(x1, nivelSL, x2, nivelSL, color=#ff5252, style=line.style_solid, width=2)
+        lnTP1     := line.new(x1, nivelTP1, x2, nivelTP1, color=#69f0ae, style=line.style_dotted, width=1)
+        lnTP2     := line.new(x1, nivelTP2, x2, nivelTP2, color=#00e676, style=line.style_dotted, width=1)
+        lbEntrada := label.new(x2, nivelEntrada, "ENTRADA " + str.tostring(nivelEntrada, format.mintick), style=label.style_label_left, color=color.new(#00ffcc, 80), textcolor=#00ffcc, size=size.small)
+        lbSL      := label.new(x2, nivelSL, "SL " + str.tostring(nivelSL, format.mintick), style=label.style_label_left, color=color.new(#ff5252, 80), textcolor=#ff5252, size=size.small)
+        lbTP1     := label.new(x2, nivelTP1, "TP1 (60%) " + str.tostring(nivelTP1, format.mintick), style=label.style_label_left, color=color.new(#69f0ae, 80), textcolor=#69f0ae, size=size.small)
+        lbTP2     := label.new(x2, nivelTP2, "TP2 (40%) " + str.tostring(nivelTP2, format.mintick), style=label.style_label_left, color=color.new(#00e676, 80), textcolor=#00e676, size=size.small)
+
+bgcolor(visLon ? color.new(#2962ff, 92) : na, title="Sesión Londres")
+bgcolor(visNY ? color.new(#aa00ff, 92) : na, title="Sesión Nueva York")
+
+// ==========================================
+// 9. DASHBOARD PREMIUM + WATCHLIST LIVE
+//
+//  Los mismos hexes que usa el panel del EA de MT4 (mt4/PessaroBridgeEA_v2.mq4,
+//  input InpTema). Si se toca un color aquí, hay que tocarlo allá: el trader ve
+//  las dos pantallas a la vez y una diferencia de tono se lee como "no es el
+//  mismo sistema".
+// ==========================================
+bool esDorado = themeColor == "Dorado Elite"
+bool esCyber  = themeColor == "Oscuro / Cyberpunk"
+
+color bgHeader  = esDorado ? color.new(#1a1400, 0)  : esCyber ? color.new(#0d1117, 0)  : color.new(#081426, 0)
+color bgSub     = esDorado ? color.new(#26200a, 5)  : esCyber ? color.new(#151924, 5)  : color.new(#0a192f, 5)
+color bgRowEven = esDorado ? color.new(#211b08, 10) : esCyber ? color.new(#1e222d, 10) : color.new(#122a45, 10)
+color bgRowOdd  = esDorado ? color.new(#2b2410, 10) : esCyber ? color.new(#262b38, 10) : color.new(#183a5c, 10)
+color txtAccent = esDorado ? #ffd700 : esCyber ? #00ffcc : #64ffda
+color txtMuted  = color.new(color.white, 30)
+color cVerde    = #00e676
+color cRojo     = #ff5252
+color cNeutro   = color.new(color.white, 55)
+
+f_txtScan(int e) =>
+    e ==  3 ? "🚀 BUY DISPARADO" : e == -3 ? "🔻 SELL DISPARADO" : e == 4 ? "✅ MÁX. TRADES HOY" : e ==  2 ? "🟢 SETUP LONG" : e == -2 ? "🔴 SETUP SHORT" : e ==  1 ? "⏫ Impulso alcista" : e == -1 ? "⏬ Impulso bajista" : "· · ·"
+
+f_colScan(int e) =>
+    e >= 2 and e != 4 ? cVerde : e <= -2 ? cRojo : e == 4 ? txtAccent : e == 1 ? color.new(cVerde, 40) : e == -1 ? color.new(cRojo, 40) : cNeutro
+
+var table dash = table.new(dashPos == "Superior Derecha" ? position.top_right : dashPos == "Superior Izquierda" ? position.top_left : dashPos == "Inferior Derecha" ? position.bottom_right : position.bottom_left, 2, 28, border_width=1, border_color=color.new(color.black, 70), frame_width=2, frame_color=color.new(txtAccent, 55))
+
+f_filaScan(int fila, bool activo, string symFull, int est) =>
+    color bgc = fila % 2 == 0 ? bgRowEven : bgRowOdd
+    table.cell(dash, 0, fila, f_nombreCorto(symFull), bgcolor=bgc, text_color=activo ? color.white : txtMuted, text_size=size.tiny)
+    table.cell(dash, 1, fila, activo ? f_txtScan(est) : "— slot off", bgcolor=bgc, text_color=activo ? f_colScan(est) : txtMuted, text_size=size.tiny)
+
+if barstate.islast
+    string txtSesion  = ventanaPermitida ? "🌍 LON→NY · ACTIVA" : "💤 FUERA DE VENTANA"
+    string txtTF      = timeframe.period + "m · " + (tfValido ? "ÓPTIMO ✅" : "FUERA DE RANGO ⚠️")
+    string txtEstado  = f_txtScan(estadoG)
+    string txtImpulso = modoImpulso == "Adaptativo (ATR volatilidad)" ? str.tostring(minImpulso / pipSize, "#.#") + " pips (ATR×" + str.tostring(multiATR * multiPerfil, "#.##") + ")" : str.tostring(minImpulso / pipSize, "#.#") + " pips fijos"
+    string txtNiveles = setupActivo ? str.tostring(nivelEntrada, format.mintick) + "  /  " + str.tostring(nivelSL, format.mintick) : "—"
+    string txtTPs     = setupActivo ? str.tostring(nivelTP1, format.mintick) + "  /  " + str.tostring(nivelTP2, format.mintick) : "—"
+    string txtRR      = setupActivo and not na(rr1) ? "1 : " + str.tostring(rr1, "#.##") + "  ·  1 : " + str.tostring(rr2, "#.##") : "—"
+    string txtLotes   = setupActivo ? str.tostring(loteTP1, "#.##") + " + " + str.tostring(loteTP2, "#.##") : "—"
+    string txtCalidad = setupActivo ? (f_grade(impAtrG) == "ELITE" ? "★ ELITE" : "STANDARD") + "  ·  " + str.tostring(impAtrG, "#.##") + "×ATR" : "—"
+
+    table.cell(dash, 0, 0, "⚜ TD CONFLUENCE LON→NY", bgcolor=bgHeader, text_color=txtAccent, text_size=size.small)
+    table.cell(dash, 1, 0, syminfo.ticker + " · " + nombrePerfil, bgcolor=bgHeader, text_color=txtAccent, text_size=size.small)
+    table.cell(dash, 0, 1, "Timeframe", bgcolor=bgRowOdd, text_color=txtMuted, text_size=size.tiny)
+    table.cell(dash, 1, 1, txtTF, bgcolor=bgRowOdd, text_color=tfValido ? cVerde : cRojo, text_size=size.tiny)
+    table.cell(dash, 0, 2, "Impulso mín.", bgcolor=bgRowEven, text_color=txtMuted, text_size=size.tiny)
+    table.cell(dash, 1, 2, txtImpulso, bgcolor=bgRowEven, text_color=txtAccent, text_size=size.tiny)
+    table.cell(dash, 0, 3, "Sesión", bgcolor=bgRowOdd, text_color=txtMuted, text_size=size.tiny)
+    table.cell(dash, 1, 3, txtSesion, bgcolor=bgRowOdd, text_color=ventanaPermitida ? cVerde : cNeutro, text_size=size.tiny)
+    table.cell(dash, 0, 4, "Estado Motor", bgcolor=bgRowEven, text_color=txtMuted, text_size=size.tiny)
+    table.cell(dash, 1, 4, txtEstado, bgcolor=bgRowEven, text_color=f_colScan(estadoG), text_size=size.tiny)
+    table.cell(dash, 0, 5, "Trades hoy", bgcolor=bgRowOdd, text_color=txtMuted, text_size=size.tiny)
+    table.cell(dash, 1, 5, str.tostring(tradesHoyG) + " / " + str.tostring(maxTradesDia), bgcolor=bgRowOdd, text_color=txtAccent, text_size=size.tiny)
+    table.cell(dash, 0, 6, "Entrada / SL", bgcolor=bgRowEven, text_color=txtMuted, text_size=size.tiny)
+    table.cell(dash, 1, 6, txtNiveles, bgcolor=bgRowEven, text_color=txtAccent, text_size=size.tiny)
+    table.cell(dash, 0, 7, "TP1 / TP2", bgcolor=bgRowOdd, text_color=txtMuted, text_size=size.tiny)
+    table.cell(dash, 1, 7, txtTPs, bgcolor=bgRowOdd, text_color=txtAccent, text_size=size.tiny)
+    table.cell(dash, 0, 8, "Ratio R:R", bgcolor=bgRowEven, text_color=txtMuted, text_size=size.tiny)
+    table.cell(dash, 1, 8, txtRR, bgcolor=bgRowEven, text_color=txtAccent, text_size=size.tiny)
+    table.cell(dash, 0, 9, "Lotes 60/40", bgcolor=bgRowOdd, text_color=txtMuted, text_size=size.tiny)
+    table.cell(dash, 1, 9, txtLotes, bgcolor=bgRowOdd, text_color=txtAccent, text_size=size.tiny)
+    table.cell(dash, 0, 10, "Calidad", bgcolor=bgRowEven, text_color=txtMuted, text_size=size.tiny)
+    table.cell(dash, 1, 10, txtCalidad, bgcolor=bgRowEven, text_color=txtAccent, text_size=size.tiny)
+    table.cell(dash, 0, 11, "Riesgo", bgcolor=bgRowOdd, text_color=txtMuted, text_size=size.tiny)
+    table.cell(dash, 1, 11, "$" + str.tostring(riesgoG, "#.##") + "  (" + str.tostring(pctRiesgo * 100, "#.##") + "%)", bgcolor=bgRowOdd, text_color=txtAccent, text_size=size.tiny)
+    table.cell(dash, 0, 12, "Log", bgcolor=bgRowEven, text_color=txtMuted, text_size=size.tiny)
+    table.cell(dash, 1, 12, logHistorial, bgcolor=bgRowEven, text_color=txtAccent, text_size=size.tiny)
+
+    table.cell(dash, 0, 13, "📡 WATCHLIST LIVE", bgcolor=bgSub, text_color=txtAccent, text_size=size.tiny)
+    table.cell(dash, 1, 13, "Webhooks v2.0 · TF " + timeframe.period + "m", bgcolor=bgSub, text_color=txtMuted, text_size=size.tiny)
+
+    f_filaScan(14, scan1,  sym1,  est1)
+    f_filaScan(15, scan2,  sym2,  est2)
+    f_filaScan(16, scan3,  sym3,  est3)
+    f_filaScan(17, scan4,  sym4,  est4)
+    f_filaScan(18, scan5,  sym5,  est5)
+    f_filaScan(19, scan6,  sym6,  est6)
+    f_filaScan(20, scan7,  sym7,  est7)
+    f_filaScan(21, scan8,  sym8,  est8)
+    f_filaScan(22, scan9,  sym9,  est9)
+    f_filaScan(23, scan10, sym10, est10)
+    f_filaScan(24, scan11, sym11, est11)
+    f_filaScan(25, scan12, sym12, est12)
+    f_filaScan(26, scan13, sym13, est13)
+    f_filaScan(27, scan14, sym14, est14)
