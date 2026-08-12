@@ -236,6 +236,36 @@ export async function sendClientTokenEmail(opts: { client: ClientEmailData; toke
 }
 
 /**
+ * Aviso al CLIENTE de que se extendió su vigencia.
+ *
+ * No lleva el token: la renovación no lo cambia, el cliente ya lo tiene
+ * configurado en su EA y no necesita tocar nada. Repetirlo aquí solo pondría
+ * el secreto a circular por correo una vez más cada mes sin ninguna razón.
+ */
+export function buildClientRenewedEmail(opts: { client: ClientEmailData }): RenderedEmail {
+  const { client } = opts;
+  const hasta = client.expiresAt ? formatDate(client.expiresAt) : "—";
+
+  const body = `${p(`Hola ${esc(client.firstName)} ${esc(client.lastName)},`)}
+    ${p(`Renovamos tu acceso a las señales de Pessaro Capital. Queda activo hasta el <strong style="color:${C.goldLight}">${hasta}</strong>.`)}
+    ${p("No tienes que hacer nada: tu token es el mismo de siempre y tu Expert Advisor sigue configurado. Si el EA estaba dando error por vencimiento, volverá a recibir señales en el próximo intento.", { muted: true })}
+    ${dataTable([
+      ["Bróker", esc(client.broker)],
+      ["Tipo de cuenta", client.accountType === "real" ? "REAL" : "Demo"],
+      ["N° de cuenta", esc(client.accountNumber)],
+      ["Servidor", esc(client.brokerServer)],
+      ["Vigencia", `hasta el ${hasta}`],
+    ])}
+    ${p("Si no reconoces esta renovación, respóndenos este correo.", { muted: true })}`;
+
+  return { subject: "Renovamos tu acceso a las señales de Pessaro Bridge", html: emailShell(body) };
+}
+
+export async function sendClientRenewedEmail(opts: { client: ClientEmailData }): Promise<string> {
+  return sendEmail({ to: opts.client.email, ...buildClientRenewedEmail(opts) });
+}
+
+/**
  * Aviso a los super_admin de que se dio de alta un cliente.
  *
  * NO lleva el token. Un correo de notificación se reenvía, se archiva y se lee

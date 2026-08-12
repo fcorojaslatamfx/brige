@@ -1,0 +1,502 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © PessaroCapital
+
+//@version=6
+indicator("TD Confluence Londres Nueva York v2.0", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=100)
+
+// ============================================================================
+//  TD CONFLUENCE LONDRES → NUEVA YORK V2.0 · SERVIDOR MULTI-SÍMBOLO
+//  ─────────────────────────────────────────────────────────────
+//  · Ventana continua: apertura de Londres → cierre de Nueva York
+//  · Impulso mínimo ADAPTATIVO por ATR (corrige la falta de señales en FX)
+//  · Servidor de webhooks: hasta 14 instrumentos desde UN solo gráfico
+//  · Varios trades por día con cooldown configurable
+//  · Perfiles automáticos: A JPY/Metales · B Oceanía · C Majors · D Índices/Energía
+//
+//  CÓMO ACTIVAR LOS WEBHOOKS DE TODA LA WATCHLIST:
+//  1) Coloca este indicador en UN gráfico cualquiera (ej. XAUUSD 15m)
+//  2) Configura los 14 slots del "Servidor Multi-Símbolo" con tu watchlist
+//  3) Crea UNA alerta: condición "Any alert() function call" + URL del webhook
+//  → Cada señal de cualquier símbolo llegará con su propio JSON.
+//  ⚠️ No agregues símbolos NO operables (VIX, USDT.D, TOTAL2).
+// ============================================================================
+
+// ==========================================
+// 1. CONFIGURACIÓN GENERAL
+// ==========================================
+modoPerfil    = input.string("Automático (Multi-Instrumento)", title="🏆 Modo de Perfil", options=["Automático (Multi-Instrumento)", "Manual: Perfil A (JPY / Metales)", "Manual: Perfil B (Oceanía)", "Manual: Perfil C (Majors)", "Manual: Perfil D (Índices / Energía)"], group="💾 SETUP")
+spreadBroker  = input.float(3.0, title="💰 Spread del Bróker (Pips)", step=0.5, group="💾 SETUP")
+capitalCuenta = input.float(10000.0, title="💳 Balance de Cuenta ($ USD)", minval=1.0, group="💾 SETUP")
+valorPipLote  = input.float(10.0, title="💵 Valor del Pip por Lote Estándar ($)", minval=0.01, tooltip="≈ 10 USD por lote estándar en pares XXX/USD. El EA receptor debe recalcular por instrumento; los lotes del JSON son referenciales.", group="💾 SETUP")
+filtroCorrel  = input.bool(true, title="🛡️ Bloquear Correlación AUD/NZD (símbolo del gráfico)", group="💾 SETUP")
+
+// Gestión de la jornada Londres → NY
+maxTradesDia  = input.int(3, title="🎯 Máx. trades por día (por símbolo)", minval=1, maxval=10, group="🎯 GESTIÓN DE JORNADA")
+cooldownVelas = input.int(6, title="🧊 Cooldown entre señales (velas)", minval=0, maxval=50, group="🎯 GESTIÓN DE JORNADA")
+expiraVelas   = input.int(12, title="⏳ Expiración del setup (velas)", minval=3, maxval=50, group="🎯 GESTIÓN DE JORNADA")
+
+// Impulso mínimo — ADAPTATIVO (recomendado) o fijo
+modoImpulso  = input.string("Adaptativo (ATR volatilidad)", title="⚡ Modo de Impulso Mínimo", options=["Adaptativo (ATR volatilidad)", "Fijo (pips por perfil)"], tooltip="ADAPTATIVO: el impulso mínimo = ATR × multiplicador. Se autoajusta a la volatilidad de cada instrumento (soluciona la falta de señales en pares FX).", group="⚡ IMPULSO")
+multiATR     = input.float(1.2, title="   Multiplicador ATR", minval=0.3, maxval=5.0, step=0.1, group="⚡ IMPULSO")
+atrLen       = input.int(14, title="   Período ATR", minval=5, maxval=50, group="⚡ IMPULSO")
+minPipsFijo  = input.float(25.0, title="   Pips mínimos (solo modo Fijo)", minval=1.0, group="⚡ IMPULSO")
+
+// Retrocesos Fibonacci editables por perfil
+fiboA = input.float(0.786, title="Fibo entrada · Perfil A (JPY/Metales)", minval=0.3, maxval=0.9, step=0.001, group="📐 FIBONACCI POR PERFIL")
+fiboB = input.float(0.618, title="Fibo entrada · Perfil B (Oceanía)", minval=0.3, maxval=0.9, step=0.001, group="📐 FIBONACCI POR PERFIL")
+fiboC = input.float(0.618, title="Fibo entrada · Perfil C (Majors)", minval=0.3, maxval=0.9, step=0.001, tooltip="Reducido de 0.705 → 0.618 para aumentar la tasa de llenado en EURUSD/GBPUSD.", group="📐 FIBONACCI POR PERFIL")
+fiboD = input.float(0.618, title="Fibo entrada · Perfil D (Índices/Energía)", minval=0.3, maxval=0.9, step=0.001, group="📐 FIBONACCI POR PERFIL")
+
+// Timeframe 3–15 minutos
+soloTFValido = input.bool(true, title="⏱️ Operar SOLO en TF de 3 a 15 minutos", group="⏱️ TIMEFRAME 3m–15m")
+
+// Sesión continua: apertura Londres → cierre Nueva York (hora de NY)
+sessionOper = input.session("0300-1600:23456", title="🌍 Ventana Operativa Londres → NY", tooltip="03:00 NY = apertura de Londres · 16:00 NY = cierre de Nueva York.", group="⏱️ HORARIO LONDRES → NUEVA YORK")
+useTimeZone = input.string("America/New_York", title="🌐 Zona Horaria", group="⏱️ HORARIO LONDRES → NUEVA YORK")
+sesLonVis   = input.session("0300-1130:23456", title="   🇬🇧 Sombreado visual Londres", group="⏱️ HORARIO LONDRES → NUEVA YORK")
+sesNYVis    = input.session("0800-1600:23456", title="   🇺🇸 Sombreado visual Nueva York", group="⏱️ HORARIO LONDRES → NUEVA YORK")
+
+mostrarMarcas = input.bool(true, title="🔔 Etiquetas de señal en el gráfico", group="🔔 NOTIFICACIONES")
+mostrarZonas  = input.bool(true, title="📦 Cajas de zona Riesgo / Beneficio", group="🔔 NOTIFICACIONES")
+
+// ── SERVIDOR MULTI-SÍMBOLO (webhooks de toda la watchlist) ──
+scan1  = input.bool(true,  title="Slot 1 activo",  group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s1")
+sym1   = input.symbol("OANDA:XAUUSD",   title="", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s1")
+scan2  = input.bool(true,  title="Slot 2 activo",  group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s2")
+sym2   = input.symbol("OANDA:XAGUSD",   title="", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s2")
+scan3  = input.bool(true,  title="Slot 3 activo",  group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s3")
+sym3   = input.symbol("TVC:USOIL",      title="", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s3")
+scan4  = input.bool(true,  title="Slot 4 activo",  group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s4")
+sym4   = input.symbol("CAPITALCOM:US30",  title="", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s4")
+scan5  = input.bool(true,  title="Slot 5 activo",  group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s5")
+sym5   = input.symbol("CAPITALCOM:US500", title="", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s5")
+scan6  = input.bool(true,  title="Slot 6 activo",  group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s6")
+sym6   = input.symbol("CAPITALCOM:US100", title="", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s6")
+scan7  = input.bool(true,  title="Slot 7 activo",  group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s7")
+sym7   = input.symbol("CAPITALCOM:DE40",  title="", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s7")
+scan8  = input.bool(true,  title="Slot 8 activo",  group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s8")
+sym8   = input.symbol("CAPITALCOM:UK100", title="", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s8")
+scan9  = input.bool(true,  title="Slot 9 activo",  group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s9")
+sym9   = input.symbol("FX:EURJPY",      title="", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s9")
+scan10 = input.bool(true,  title="Slot 10 activo", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s10")
+sym10  = input.symbol("FX:GBPUSD",      title="", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s10")
+scan11 = input.bool(true,  title="Slot 11 activo", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s11")
+sym11  = input.symbol("FX:EURUSD",      title="", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s11")
+scan12 = input.bool(true,  title="Slot 12 activo", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s12")
+sym12  = input.symbol("FX:AUDUSD",      title="", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s12")
+scan13 = input.bool(true,  title="Slot 13 activo", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s13")
+sym13  = input.symbol("FX:NZDUSD",      title="", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s13")
+scan14 = input.bool(true,  title="Slot 14 activo", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s14")
+sym14  = input.symbol("OANDA:GBPCAD",   title="", group="📡 SERVIDOR MULTI-SÍMBOLO", inline="s14")
+
+// Interfaz
+themeColor = input.string("Dorado Elite", title="🎨 Tema del Dashboard", options=["Dorado Elite", "Oscuro / Cyberpunk", "Azul Naval"], group="🎨 INTERFAZ VISUAL")
+dashPos    = input.string("Superior Derecha", title="📍 Posición del Dashboard", options=["Superior Derecha", "Superior Izquierda", "Inferior Derecha", "Inferior Izquierda"], group="🎨 INTERFAZ VISUAL")
+
+// ==========================================
+// 2. TIMEFRAME, PERFIL Y CONSTANTES
+//    (todo se re-evalúa por símbolo dentro de request.security)
+// ==========================================
+float tfMinutos = timeframe.in_seconds() / 60.0
+bool  tfValido  = tfMinutos >= 3 and tfMinutos <= 15
+bool  tfOK      = not soloTFValido or tfValido
+float factorTF  = math.sqrt(tfMinutos / 5.0)
+
+float pipSize        = syminfo.mintick * 10
+float spreadEnPrecio = spreadBroker * pipSize
+float bufferEntrada  = 2.0 * pipSize
+float atrValor       = ta.atr(atrLen)
+
+f_perfilAuto() =>
+    string t = str.upper(syminfo.ticker)
+    bool esMetal   = str.contains(t, "XAU") or str.contains(t, "GOLD") or str.contains(t, "XAG") or str.contains(t, "SILVER")
+    bool esJPY     = syminfo.currency == "JPY" or str.contains(t, "JPY")
+    bool esOceania = str.contains(t, "AUD") or str.contains(t, "NZD")
+    bool esIndiceEnergia = syminfo.type == "index" or str.contains(t, "US30") or str.contains(t, "US500") or str.contains(t, "SP500") or str.contains(t, "SPX") or str.contains(t, "US100") or str.contains(t, "NAS") or str.contains(t, "US2000") or str.contains(t, "DE40") or str.contains(t, "DAX") or str.contains(t, "UK100") or str.contains(t, "FTSE") or str.contains(t, "JP225") or str.contains(t, "NIKKEI") or str.contains(t, "HK50") or str.contains(t, "SX5E") or str.contains(t, "OIL") or str.contains(t, "WTI") or str.contains(t, "BRENT")
+    (esMetal or esJPY) ? "A" : esOceania ? "B" : esIndiceEnergia ? "D" : "C"
+
+string perfilActivo = modoPerfil == "Automático (Multi-Instrumento)" ? f_perfilAuto() : modoPerfil == "Manual: Perfil A (JPY / Metales)" ? "A" : modoPerfil == "Manual: Perfil B (Oceanía)" ? "B" : modoPerfil == "Manual: Perfil C (Majors)" ? "C" : "D"
+
+float fiboEntrada   = perfilActivo == "A" ? fiboA : perfilActivo == "B" ? fiboB : perfilActivo == "C" ? fiboC : fiboD
+float fiboTP2       = perfilActivo == "A" ? 0.618 : perfilActivo == "B" ? 0.27 : 0.5
+int   ticksSL       = perfilActivo == "A" ? 6 : perfilActivo == "B" ? 4 : 5
+float pctRiesgo     = perfilActivo == "A" ? 0.005 : perfilActivo == "B" ? 0.010 : perfilActivo == "C" ? 0.0075 : 0.005
+float multiPerfil   = perfilActivo == "A" ? 1.15 : perfilActivo == "B" ? 0.90 : perfilActivo == "C" ? 1.00 : 1.05
+string nombrePerfil = perfilActivo == "A" ? "A · JPY/Metales" : perfilActivo == "B" ? "B · Oceanía" : perfilActivo == "C" ? "C · Majors" : "D · Índices/Energía"
+
+// Impulso mínimo en PRECIO: adaptativo (ATR) o fijo (pips)
+float minImpulso = modoImpulso == "Adaptativo (ATR volatilidad)" ? atrValor * multiATR * multiPerfil : minPipsFijo * factorTF * pipSize
+
+// ==========================================
+// 3. MOTOR TD + FIBONACCI (función autónoma)
+//    Devuelve: [señal, estado, entrada, sl, tp1, tp2, lote1, lote2, tradesHoy]
+//    señal: 1 buy · -1 sell · 2 cancelación · 0 nada
+//    estado: ±3 señal · 4 máx. trades · ±2 setup · ±1 impulso · 0 nada
+// ==========================================
+f_engine(bool bloqueado) =>
+    var float ini         = na
+    var float fin         = na
+    var int   dir         = 0
+    var int   velaAct     = na
+    var int   tradesHoy   = 0
+    var int   ultimaSenal = na
+
+    bool ventana  = not na(time(timeframe.period, sessionOper, useTimeZone))
+    bool nuevoDia = time("D") != time("D")[1]
+
+    if nuevoDia
+        tradesHoy := 0
+        dir       := 0
+        velaAct   := na
+    if not ventana
+        dir     := 0
+        velaAct := na
+
+    bool tdDemand = low[2] < low[1] and low[2] < low[3] and low[2] < low and low[2] < low[4]
+    bool tdSupply = high[2] > high[1] and high[2] > high[3] and high[2] > high and high[2] > high[4]
+
+    bool cooldownOK  = na(ultimaSenal) or (bar_index - ultimaSenal >= cooldownVelas)
+    bool puedeOperar = ventana and tradesHoy < maxTradesDia and not bloqueado and tfOK and cooldownOK
+
+    // 1) Completar impulsos pendientes
+    if tdSupply and dir == 1 and puedeOperar
+        fin := high[2]
+        if (fin - ini) >= minImpulso
+            dir     := 2
+            velaAct := bar_index
+        else
+            dir := 0
+    if tdDemand and dir == -1 and puedeOperar
+        fin := low[2]
+        if (ini - fin) >= minImpulso
+            dir     := -2
+            velaAct := bar_index
+        else
+            dir := 0
+
+    // 2) Iniciar / actualizar impulsos (sin destruir un setup activo ±2)
+    if tdDemand and puedeOperar and (dir == 0 or dir == 1)
+        ini := low[2]
+        dir := 1
+    if tdSupply and puedeOperar and (dir == 0 or dir == -1)
+        ini := high[2]
+        dir := -1
+
+    // 3) Niveles Fibonacci
+    float entrada = na
+    float sl      = na
+    float tp1     = na
+    float tp2     = na
+    if dir == 2
+        float rango = fin - ini
+        entrada := fin - rango * fiboEntrada + bufferEntrada
+        sl      := ini - spreadEnPrecio - ticksSL * syminfo.mintick
+        tp1     := fin
+        tp2     := fin + rango * fiboTP2
+    if dir == -2
+        float rango = ini - fin
+        entrada := fin + rango * fiboEntrada - bufferEntrada
+        sl      := ini + spreadEnPrecio + ticksSL * syminfo.mintick
+        tp1     := fin
+        tp2     := fin - rango * fiboTP2
+
+    // 4) Lotes 60/40 (referenciales; el EA debe recalcular por instrumento)
+    float distPips = math.abs(entrada - sl) / pipSize
+    float lotes    = distPips > 0 ? capitalCuenta * pctRiesgo / (distPips * valorPipLote) : 0.0
+    lotes := math.max(0.02, math.round(lotes, 2))
+    float l1 = math.max(0.01, math.round(lotes * 0.60, 2))
+    float l2 = math.max(0.01, math.round(lotes * 0.40, 2))
+
+    // 5) Gatillos y expiración
+    bool trigCompra = dir == 2 and low <= entrada and close > sl and puedeOperar
+    bool trigVenta  = dir == -2 and high >= entrada and close < sl and puedeOperar
+    bool expirado   = not na(velaAct) and (dir == 2 or dir == -2) and (bar_index - velaAct > expiraVelas) and not trigCompra and not trigVenta
+
+    if trigCompra or trigVenta
+        tradesHoy   += 1
+        ultimaSenal := bar_index
+        dir         := 0
+        velaAct     := na
+    if expirado
+        dir     := 0
+        velaAct := na
+
+    int senal  = trigCompra ? 1 : trigVenta ? -1 : expirado ? 2 : 0
+    int estado = trigCompra ? 3 : trigVenta ? -3 : tradesHoy >= maxTradesDia ? 4 : dir
+
+    [senal, estado, entrada, sl, tp1, tp2, l1, l2, tradesHoy]
+
+// ==========================================
+// 4. CORRELACIÓN AUD/NZD (símbolo del gráfico)
+// ==========================================
+f_hermanoOpero() =>
+    [_s, _e, _en, _sl, _t1, _t2, _l1, _l2, th] = f_engine(false)
+    th > 0
+
+bool esParCorrel = syminfo.ticker == "AUDUSD" or syminfo.ticker == "NZDUSD"
+string tickerHermano = syminfo.ticker == "AUDUSD" ? "FX:NZDUSD" : syminfo.ticker == "NZDUSD" ? "FX:AUDUSD" : syminfo.tickerid
+bool hermanoDisparado = request.security(tickerHermano, timeframe.period, f_hermanoOpero(), barmerge.gaps_off, barmerge.lookahead_off)
+bool bloqueoPorCorrelacion = filtroCorrel and esParCorrel and hermanoDisparado
+
+// ==========================================
+// 5. MOTOR EN EL SÍMBOLO DEL GRÁFICO
+// ==========================================
+[senalG, estadoG, nivelEntrada, nivelSL, nivelTP1, nivelTP2, loteTP1, loteTP2, tradesHoyG] = f_engine(bloqueoPorCorrelacion)
+
+bool ventanaPermitida = not na(time(timeframe.period, sessionOper, useTimeZone))
+bool visLon = not na(time(timeframe.period, sesLonVis, useTimeZone))
+bool visNY  = not na(time(timeframe.period, sesNYVis, useTimeZone))
+
+float distSLPips = math.abs(nivelEntrada - nivelSL) / pipSize
+float rr1 = distSLPips > 0 ? math.abs(nivelTP1 - nivelEntrada) / math.abs(nivelEntrada - nivelSL) : na
+float rr2 = distSLPips > 0 ? math.abs(nivelTP2 - nivelEntrada) / math.abs(nivelEntrada - nivelSL) : na
+float montoArriesgar = capitalCuenta * pctRiesgo
+
+// ==========================================
+// 6. SERVIDOR MULTI-SÍMBOLO (motor en cada slot vía request.security)
+// ==========================================
+f_slot() =>
+    [s, e, en, sl_, t1, t2, l1, l2, _th] = f_engine(false)
+    [s, e, en, sl_, t1, t2, l1, l2]
+
+[sen1,  est1,  pre1,  stp1,  tpA1,  tpB1,  ltA1,  ltB1]  = request.security(sym1,  timeframe.period, f_slot(), barmerge.gaps_off, barmerge.lookahead_off)
+[sen2,  est2,  pre2,  stp2,  tpA2,  tpB2,  ltA2,  ltB2]  = request.security(sym2,  timeframe.period, f_slot(), barmerge.gaps_off, barmerge.lookahead_off)
+[sen3,  est3,  pre3,  stp3,  tpA3,  tpB3,  ltA3,  ltB3]  = request.security(sym3,  timeframe.period, f_slot(), barmerge.gaps_off, barmerge.lookahead_off)
+[sen4,  est4,  pre4,  stp4,  tpA4,  tpB4,  ltA4,  ltB4]  = request.security(sym4,  timeframe.period, f_slot(), barmerge.gaps_off, barmerge.lookahead_off)
+[sen5,  est5,  pre5,  stp5,  tpA5,  tpB5,  ltA5,  ltB5]  = request.security(sym5,  timeframe.period, f_slot(), barmerge.gaps_off, barmerge.lookahead_off)
+[sen6,  est6,  pre6,  stp6,  tpA6,  tpB6,  ltA6,  ltB6]  = request.security(sym6,  timeframe.period, f_slot(), barmerge.gaps_off, barmerge.lookahead_off)
+[sen7,  est7,  pre7,  stp7,  tpA7,  tpB7,  ltA7,  ltB7]  = request.security(sym7,  timeframe.period, f_slot(), barmerge.gaps_off, barmerge.lookahead_off)
+[sen8,  est8,  pre8,  stp8,  tpA8,  tpB8,  ltA8,  ltB8]  = request.security(sym8,  timeframe.period, f_slot(), barmerge.gaps_off, barmerge.lookahead_off)
+[sen9,  est9,  pre9,  stp9,  tpA9,  tpB9,  ltA9,  ltB9]  = request.security(sym9,  timeframe.period, f_slot(), barmerge.gaps_off, barmerge.lookahead_off)
+[sen10, est10, pre10, stp10, tpA10, tpB10, ltA10, ltB10] = request.security(sym10, timeframe.period, f_slot(), barmerge.gaps_off, barmerge.lookahead_off)
+[sen11, est11, pre11, stp11, tpA11, tpB11, ltA11, ltB11] = request.security(sym11, timeframe.period, f_slot(), barmerge.gaps_off, barmerge.lookahead_off)
+[sen12, est12, pre12, stp12, tpA12, tpB12, ltA12, ltB12] = request.security(sym12, timeframe.period, f_slot(), barmerge.gaps_off, barmerge.lookahead_off)
+[sen13, est13, pre13, stp13, tpA13, tpB13, ltA13, ltB13] = request.security(sym13, timeframe.period, f_slot(), barmerge.gaps_off, barmerge.lookahead_off)
+[sen14, est14, pre14, stp14, tpA14, tpB14, ltA14, ltB14] = request.security(sym14, timeframe.period, f_slot(), barmerge.gaps_off, barmerge.lookahead_off)
+
+// ==========================================
+// 7. CONSTRUCCIÓN DE JSON Y ALERTAS WEBHOOK
+// ==========================================
+f_nombreCorto(string s) =>
+    array<string> partes = str.split(s, ":")
+    array.get(partes, array.size(partes) - 1)
+
+f_json(string accion, string simbolo, float en, float sl_, float t1, float t2, float l1, float l2) =>
+    '{"account_id":"TD_CONF_LON_NY","action":"' + accion + '","symbol":"' + simbolo + '","tf":"' + timeframe.period + '","type":"LIMIT","price":' + str.tostring(en) + ',"sl":' + str.tostring(sl_) + ',"partial_1":{"lots":' + str.tostring(l1) + ',"tp":' + str.tostring(t1) + '},"partial_2":{"lots":' + str.tostring(l2) + ',"tp":' + str.tostring(t2) + '},"risk_usd":' + str.tostring(montoArriesgar) + ',"timestamp":' + str.tostring(time) + '}'
+
+f_jsonCancel(string simbolo) =>
+    '{"account_id":"TD_CONF_LON_NY","action":"CANCEL_ALL","symbol":"' + simbolo + '","tf":"' + timeframe.period + '","timestamp":' + str.tostring(time) + '}'
+
+f_jsonSenal(int s, string symFull, float en, float sl_, float t1, float t2, float l1, float l2) =>
+    string nom = f_nombreCorto(symFull)
+    s == 1 ? f_json("BUY_DUAL", nom, en, sl_, t1, t2, l1, l2) : s == -1 ? f_json("SELL_DUAL", nom, en, sl_, t1, t2, l1, l2) : s == 2 ? f_jsonCancel(nom) : na
+
+// El símbolo del gráfico se excluye de los slots para evitar alertas duplicadas
+f_slotDistinto(string symFull) =>
+    f_nombreCorto(symFull) != syminfo.ticker
+
+string j1  = f_jsonSenal(sen1,  sym1,  pre1,  stp1,  tpA1,  tpB1,  ltA1,  ltB1)
+string j2  = f_jsonSenal(sen2,  sym2,  pre2,  stp2,  tpA2,  tpB2,  ltA2,  ltB2)
+string j3  = f_jsonSenal(sen3,  sym3,  pre3,  stp3,  tpA3,  tpB3,  ltA3,  ltB3)
+string j4  = f_jsonSenal(sen4,  sym4,  pre4,  stp4,  tpA4,  tpB4,  ltA4,  ltB4)
+string j5  = f_jsonSenal(sen5,  sym5,  pre5,  stp5,  tpA5,  tpB5,  ltA5,  ltB5)
+string j6  = f_jsonSenal(sen6,  sym6,  pre6,  stp6,  tpA6,  tpB6,  ltA6,  ltB6)
+string j7  = f_jsonSenal(sen7,  sym7,  pre7,  stp7,  tpA7,  tpB7,  ltA7,  ltB7)
+string j8  = f_jsonSenal(sen8,  sym8,  pre8,  stp8,  tpA8,  tpB8,  ltA8,  ltB8)
+string j9  = f_jsonSenal(sen9,  sym9,  pre9,  stp9,  tpA9,  tpB9,  ltA9,  ltB9)
+string j10 = f_jsonSenal(sen10, sym10, pre10, stp10, tpA10, tpB10, ltA10, ltB10)
+string j11 = f_jsonSenal(sen11, sym11, pre11, stp11, tpA11, tpB11, ltA11, ltB11)
+string j12 = f_jsonSenal(sen12, sym12, pre12, stp12, tpA12, tpB12, ltA12, ltB12)
+string j13 = f_jsonSenal(sen13, sym13, pre13, stp13, tpA13, tpB13, ltA13, ltB13)
+string j14 = f_jsonSenal(sen14, sym14, pre14, stp14, tpA14, tpB14, ltA14, ltB14)
+
+if scan1 and not na(j1) and f_slotDistinto(sym1)
+    alert(j1, alert.freq_once_per_bar)
+if scan2 and not na(j2) and f_slotDistinto(sym2)
+    alert(j2, alert.freq_once_per_bar)
+if scan3 and not na(j3) and f_slotDistinto(sym3)
+    alert(j3, alert.freq_once_per_bar)
+if scan4 and not na(j4) and f_slotDistinto(sym4)
+    alert(j4, alert.freq_once_per_bar)
+if scan5 and not na(j5) and f_slotDistinto(sym5)
+    alert(j5, alert.freq_once_per_bar)
+if scan6 and not na(j6) and f_slotDistinto(sym6)
+    alert(j6, alert.freq_once_per_bar)
+if scan7 and not na(j7) and f_slotDistinto(sym7)
+    alert(j7, alert.freq_once_per_bar)
+if scan8 and not na(j8) and f_slotDistinto(sym8)
+    alert(j8, alert.freq_once_per_bar)
+if scan9 and not na(j9) and f_slotDistinto(sym9)
+    alert(j9, alert.freq_once_per_bar)
+if scan10 and not na(j10) and f_slotDistinto(sym10)
+    alert(j10, alert.freq_once_per_bar)
+if scan11 and not na(j11) and f_slotDistinto(sym11)
+    alert(j11, alert.freq_once_per_bar)
+if scan12 and not na(j12) and f_slotDistinto(sym12)
+    alert(j12, alert.freq_once_per_bar)
+if scan13 and not na(j13) and f_slotDistinto(sym13)
+    alert(j13, alert.freq_once_per_bar)
+if scan14 and not na(j14) and f_slotDistinto(sym14)
+    alert(j14, alert.freq_once_per_bar)
+
+// ── Alertas del símbolo del gráfico ──
+var string logHistorial = "ESPERANDO CONFLUENCIA"
+bool inicioVentana = ventanaPermitida and not ventanaPermitida[1]
+
+if inicioVentana
+    logHistorial := "ESPERANDO CONFLUENCIA"
+if bloqueoPorCorrelacion and ventanaPermitida
+    logHistorial := "BLOQUEO CORRELACIÓN 🛡️"
+if soloTFValido and not tfValido
+    logHistorial := "TF FUERA DE RANGO 3–15m ⚠️"
+
+if senalG == 1
+    logHistorial := "BUY DISPARADO 📈 (#" + str.tostring(tradesHoyG) + " hoy)"
+    alert(f_json("BUY_DUAL", syminfo.ticker, nivelEntrada, nivelSL, nivelTP1, nivelTP2, loteTP1, loteTP2), alert.freq_once_per_bar)
+    if mostrarMarcas
+        label.new(bar_index, low, "BUY LIMIT\n" + str.tostring(nivelEntrada, format.mintick), style=label.style_label_up, color=color.new(#00c853, 0), textcolor=color.white, size=size.small)
+
+if senalG == -1
+    logHistorial := "SELL DISPARADO 📉 (#" + str.tostring(tradesHoyG) + " hoy)"
+    alert(f_json("SELL_DUAL", syminfo.ticker, nivelEntrada, nivelSL, nivelTP1, nivelTP2, loteTP1, loteTP2), alert.freq_once_per_bar)
+    if mostrarMarcas
+        label.new(bar_index, high, "SELL LIMIT\n" + str.tostring(nivelEntrada, format.mintick), style=label.style_label_down, color=color.new(#d50000, 0), textcolor=color.white, size=size.small)
+
+if senalG == 2
+    logHistorial := "CANCELADO POR TIEMPO ⏳"
+    alert(f_jsonCancel(syminfo.ticker), alert.freq_once_per_bar)
+
+// ==========================================
+// 8. VISUALIZACIÓN EN GRÁFICO
+// ==========================================
+bool tdDemandPlot = low[2] < low[1] and low[2] < low[3] and low[2] < low and low[2] < low[4]
+bool tdSupplyPlot = high[2] > high[1] and high[2] > high[3] and high[2] > high and high[2] > high[4]
+
+plotshape(tdDemandPlot, title="TD Demand Point", style=shape.triangleup, location=location.belowbar, color=color.new(#00ffcc, 30), size=size.tiny, offset=-2)
+plotshape(tdSupplyPlot, title="TD Supply Point", style=shape.triangledown, location=location.abovebar, color=color.new(#ff5252, 30), size=size.tiny, offset=-2)
+
+bool setupActivo = (estadoG == 2 or estadoG == -2) and not na(nivelEntrada)
+
+var line  lnEntrada = na
+var line  lnSL      = na
+var line  lnTP1     = na
+var line  lnTP2     = na
+var label lbEntrada = na
+var label lbSL      = na
+var label lbTP1     = na
+var label lbTP2     = na
+var box   bxRiesgo  = na
+var box   bxProfit  = na
+
+if barstate.islast
+    line.delete(lnEntrada)
+    line.delete(lnSL)
+    line.delete(lnTP1)
+    line.delete(lnTP2)
+    label.delete(lbEntrada)
+    label.delete(lbSL)
+    label.delete(lbTP1)
+    label.delete(lbTP2)
+    box.delete(bxRiesgo)
+    box.delete(bxProfit)
+    if setupActivo
+        int x1 = bar_index - 12
+        int x2 = bar_index + 6
+        if mostrarZonas
+            bxRiesgo := box.new(x1, math.max(nivelEntrada, nivelSL), x2, math.min(nivelEntrada, nivelSL), border_color=color.new(#ff5252, 70), bgcolor=color.new(#ff5252, 88))
+            bxProfit := box.new(x1, math.max(nivelEntrada, nivelTP2), x2, math.min(nivelEntrada, nivelTP2), border_color=color.new(#00e676, 70), bgcolor=color.new(#00e676, 90))
+        lnEntrada := line.new(x1, nivelEntrada, x2, nivelEntrada, color=#00ffcc, style=line.style_dashed, width=2)
+        lnSL      := line.new(x1, nivelSL, x2, nivelSL, color=#ff5252, style=line.style_solid, width=2)
+        lnTP1     := line.new(x1, nivelTP1, x2, nivelTP1, color=#69f0ae, style=line.style_dotted, width=1)
+        lnTP2     := line.new(x1, nivelTP2, x2, nivelTP2, color=#00e676, style=line.style_dotted, width=1)
+        lbEntrada := label.new(x2, nivelEntrada, "ENTRADA " + str.tostring(nivelEntrada, format.mintick), style=label.style_label_left, color=color.new(#00ffcc, 80), textcolor=#00ffcc, size=size.small)
+        lbSL      := label.new(x2, nivelSL, "SL " + str.tostring(nivelSL, format.mintick), style=label.style_label_left, color=color.new(#ff5252, 80), textcolor=#ff5252, size=size.small)
+        lbTP1     := label.new(x2, nivelTP1, "TP1 (60%) " + str.tostring(nivelTP1, format.mintick), style=label.style_label_left, color=color.new(#69f0ae, 80), textcolor=#69f0ae, size=size.small)
+        lbTP2     := label.new(x2, nivelTP2, "TP2 (40%) " + str.tostring(nivelTP2, format.mintick), style=label.style_label_left, color=color.new(#00e676, 80), textcolor=#00e676, size=size.small)
+
+bgcolor(visLon ? color.new(#2962ff, 92) : na, title="Sesión Londres")
+bgcolor(visNY ? color.new(#aa00ff, 92) : na, title="Sesión Nueva York")
+
+// ==========================================
+// 9. DASHBOARD PREMIUM + WATCHLIST LIVE
+// ==========================================
+bool esDorado = themeColor == "Dorado Elite"
+bool esCyber  = themeColor == "Oscuro / Cyberpunk"
+
+color bgHeader  = esDorado ? color.new(#1a1400, 0)  : esCyber ? color.new(#0d1117, 0)  : color.new(#081426, 0)
+color bgSub     = esDorado ? color.new(#26200a, 5)  : esCyber ? color.new(#151924, 5)  : color.new(#0a192f, 5)
+color bgRowEven = esDorado ? color.new(#211b08, 10) : esCyber ? color.new(#1e222d, 10) : color.new(#122a45, 10)
+color bgRowOdd  = esDorado ? color.new(#2b2410, 10) : esCyber ? color.new(#262b38, 10) : color.new(#183a5c, 10)
+color txtAccent = esDorado ? #ffd700 : esCyber ? #00ffcc : #64ffda
+color txtMuted  = color.new(color.white, 30)
+color cVerde    = #00e676
+color cRojo     = #ff5252
+color cNeutro   = color.new(color.white, 55)
+
+f_txtScan(int e) =>
+    e ==  3 ? "🚀 BUY DISPARADO" : e == -3 ? "🔻 SELL DISPARADO" : e == 4 ? "✅ MÁX. TRADES HOY" : e ==  2 ? "🟢 SETUP LONG" : e == -2 ? "🔴 SETUP SHORT" : e ==  1 ? "⏫ Impulso alcista" : e == -1 ? "⏬ Impulso bajista" : "· · ·"
+
+f_colScan(int e) =>
+    e >= 2 and e != 4 ? cVerde : e <= -2 ? cRojo : e == 4 ? txtAccent : e == 1 ? color.new(cVerde, 40) : e == -1 ? color.new(cRojo, 40) : cNeutro
+
+var table dash = table.new(dashPos == "Superior Derecha" ? position.top_right : dashPos == "Superior Izquierda" ? position.top_left : dashPos == "Inferior Derecha" ? position.bottom_right : position.bottom_left, 2, 27, border_width=1, border_color=color.new(color.black, 70), frame_width=2, frame_color=color.new(txtAccent, 55))
+
+f_filaScan(int fila, bool activo, string symFull, int est) =>
+    color bgc = fila % 2 == 0 ? bgRowEven : bgRowOdd
+    table.cell(dash, 0, fila, f_nombreCorto(symFull), bgcolor=bgc, text_color=activo ? color.white : txtMuted, text_size=size.tiny)
+    table.cell(dash, 1, fila, activo ? f_txtScan(est) : "— slot off", bgcolor=bgc, text_color=activo ? f_colScan(est) : txtMuted, text_size=size.tiny)
+
+if barstate.islast
+    string txtSesion  = ventanaPermitida ? "🌍 LON→NY · ACTIVA" : "💤 FUERA DE VENTANA"
+    string txtTF      = timeframe.period + "m · " + (tfValido ? "ÓPTIMO ✅" : "FUERA DE RANGO ⚠️")
+    string txtEstado  = f_txtScan(estadoG)
+    string txtImpulso = modoImpulso == "Adaptativo (ATR volatilidad)" ? str.tostring(minImpulso / pipSize, "#.#") + " pips (ATR×" + str.tostring(multiATR * multiPerfil, "#.##") + ")" : str.tostring(minImpulso / pipSize, "#.#") + " pips fijos"
+    string txtNiveles = setupActivo ? str.tostring(nivelEntrada, format.mintick) + "  /  " + str.tostring(nivelSL, format.mintick) : "—"
+    string txtTPs     = setupActivo ? str.tostring(nivelTP1, format.mintick) + "  /  " + str.tostring(nivelTP2, format.mintick) : "—"
+    string txtRR      = setupActivo and not na(rr1) ? "1 : " + str.tostring(rr1, "#.##") + "  ·  1 : " + str.tostring(rr2, "#.##") : "—"
+    string txtLotes   = setupActivo ? str.tostring(loteTP1, "#.##") + " + " + str.tostring(loteTP2, "#.##") : "—"
+
+    table.cell(dash, 0, 0, "⚜ TD CONFLUENCE LON→NY", bgcolor=bgHeader, text_color=txtAccent, text_size=size.small)
+    table.cell(dash, 1, 0, syminfo.ticker + " · " + nombrePerfil, bgcolor=bgHeader, text_color=txtAccent, text_size=size.small)
+    table.cell(dash, 0, 1, "Timeframe", bgcolor=bgRowOdd, text_color=txtMuted, text_size=size.tiny)
+    table.cell(dash, 1, 1, txtTF, bgcolor=bgRowOdd, text_color=tfValido ? cVerde : cRojo, text_size=size.tiny)
+    table.cell(dash, 0, 2, "Impulso mín.", bgcolor=bgRowEven, text_color=txtMuted, text_size=size.tiny)
+    table.cell(dash, 1, 2, txtImpulso, bgcolor=bgRowEven, text_color=txtAccent, text_size=size.tiny)
+    table.cell(dash, 0, 3, "Sesión", bgcolor=bgRowOdd, text_color=txtMuted, text_size=size.tiny)
+    table.cell(dash, 1, 3, txtSesion, bgcolor=bgRowOdd, text_color=ventanaPermitida ? cVerde : cNeutro, text_size=size.tiny)
+    table.cell(dash, 0, 4, "Estado Motor", bgcolor=bgRowEven, text_color=txtMuted, text_size=size.tiny)
+    table.cell(dash, 1, 4, txtEstado, bgcolor=bgRowEven, text_color=f_colScan(estadoG), text_size=size.tiny)
+    table.cell(dash, 0, 5, "Trades hoy", bgcolor=bgRowOdd, text_color=txtMuted, text_size=size.tiny)
+    table.cell(dash, 1, 5, str.tostring(tradesHoyG) + " / " + str.tostring(maxTradesDia), bgcolor=bgRowOdd, text_color=txtAccent, text_size=size.tiny)
+    table.cell(dash, 0, 6, "Entrada / SL", bgcolor=bgRowEven, text_color=txtMuted, text_size=size.tiny)
+    table.cell(dash, 1, 6, txtNiveles, bgcolor=bgRowEven, text_color=txtAccent, text_size=size.tiny)
+    table.cell(dash, 0, 7, "TP1 / TP2", bgcolor=bgRowOdd, text_color=txtMuted, text_size=size.tiny)
+    table.cell(dash, 1, 7, txtTPs, bgcolor=bgRowOdd, text_color=txtAccent, text_size=size.tiny)
+    table.cell(dash, 0, 8, "Ratio R:R", bgcolor=bgRowEven, text_color=txtMuted, text_size=size.tiny)
+    table.cell(dash, 1, 8, txtRR, bgcolor=bgRowEven, text_color=txtAccent, text_size=size.tiny)
+    table.cell(dash, 0, 9, "Lotes 60/40", bgcolor=bgRowOdd, text_color=txtMuted, text_size=size.tiny)
+    table.cell(dash, 1, 9, txtLotes, bgcolor=bgRowOdd, text_color=txtAccent, text_size=size.tiny)
+    table.cell(dash, 0, 10, "Riesgo", bgcolor=bgRowEven, text_color=txtMuted, text_size=size.tiny)
+    table.cell(dash, 1, 10, "$" + str.tostring(montoArriesgar, "#.##") + "  (" + str.tostring(pctRiesgo * 100, "#.##") + "%)", bgcolor=bgRowEven, text_color=txtAccent, text_size=size.tiny)
+    table.cell(dash, 0, 11, "Log", bgcolor=bgRowOdd, text_color=txtMuted, text_size=size.tiny)
+    table.cell(dash, 1, 11, logHistorial, bgcolor=bgRowOdd, text_color=txtAccent, text_size=size.tiny)
+
+    table.cell(dash, 0, 12, "📡 WATCHLIST LIVE", bgcolor=bgSub, text_color=txtAccent, text_size=size.tiny)
+    table.cell(dash, 1, 12, "Webhooks · TF " + timeframe.period + "m", bgcolor=bgSub, text_color=txtMuted, text_size=size.tiny)
+
+    f_filaScan(13, scan1,  sym1,  est1)
+    f_filaScan(14, scan2,  sym2,  est2)
+    f_filaScan(15, scan3,  sym3,  est3)
+    f_filaScan(16, scan4,  sym4,  est4)
+    f_filaScan(17, scan5,  sym5,  est5)
+    f_filaScan(18, scan6,  sym6,  est6)
+    f_filaScan(19, scan7,  sym7,  est7)
+    f_filaScan(20, scan8,  sym8,  est8)
+    f_filaScan(21, scan9,  sym9,  est9)
+    f_filaScan(22, scan10, sym10, est10)
+    f_filaScan(23, scan11, sym11, est11)
+    f_filaScan(24, scan12, sym12, est12)
+    f_filaScan(25, scan13, sym13, est13)
+    f_filaScan(26, scan14, sym14, est14)
+
+

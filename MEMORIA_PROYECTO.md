@@ -503,6 +503,87 @@ etiqueta del botón dice alta, pero el efecto puede ser una modificación destru
 contrato de señales, no las barreras de autorización de las rutas de usuarios. Los
 dos guardarraíles se verifican a mano.
 
+## 18. FUSIÓN DEL TRADING PORTAL Y TELEMETRÍA POR EL EA (12-ago-2026)
+
+**El problema declarado era el costo de Supabase.** Había tres proyectos en la
+organización y dos se solapaban. Pero el volumen no era el problema: el bridge
+pesaba 15 MB con ~110 señales/día, muy lejos de cualquier cuota del plan Pro. El
+gasto estaba en el **cargo de compute por proyecto** y, sobre todo, en lo que el
+portal *iba* a construir y todavía no existía: MetaApi facturado **por cuenta MT
+conectada**, dos edge functions, `pg_cron` sincronizando cada 15–30 s por cuenta,
+y Realtime sobre dos tablas.
+
+**La observación que lo cambió todo:** el EA ya está instalado en el MetaTrader
+de cada cliente y ya hace un request cada 2 s para recibir señales. Es el
+reemplazo de MetaApi, y ya está pagado. El reporte de la cuenta puede viajar
+DENTRO de ese request — cero peticiones nuevas.
+
+**Por qué piggyback y no un endpoint dedicado.** Un `/api/telemetry` a 15 s
+habría añadido ~5.760 peticiones diarias por cliente para transportar datos que
+ya iban a cruzar el cable. La contrapartida asumida: el bloque `account` va cada
+60 s, así que el P&L flotante tiene hasta un minuto de retraso. La UI lo dice
+("actualizado hace Xs") en vez de fingir tiempo real. Un dato viejo etiquetado
+como viejo es honesto; uno viejo presentado como fresco es un error.
+
+**La decisión de diseño que sostiene el ahorro** está en tres líneas del EA: el
+hash del conjunto de posiciones incluye ticket, lotes, SL y TP, y **excluye
+`current_price` y `profit`**. Esos dos cambian en cada tick; incluirlos habría
+convertido "mandar cuando algo cambie" en "mandar siempre", y no habría quedado
+ahorro alguno. La regla general: al construir una huella para detectar cambios,
+incluir solo lo que cambia por una DECISIÓN, nunca lo que cambia por el mercado.
+
+**Identidad por `client_id`, no por `user_id`.** El portal original colgaba de
+`auth.users` con RLS `auth.uid() = user_id`. Los clientes del bridge no tienen
+cuenta en Supabase Auth: se autentican con el token opaco que ya usa su EA.
+Mantener las dos identidades habría obligado a sincronizarlas de por vida por
+una comodidad que nadie pidió.
+
+**Lo que se borró y por qué importa.** `tp_ohlc` habría sido la tabla más grande
+del sistema —una fila por símbolo, timeframe y vela— para alimentar a un
+componente que nunca se renderizaba: los gráficos usan el widget de TradingView.
+Realtime se quitó porque a 60 s no aporta frescura y obliga a poner la anon key
+en el navegador. Ambas eran costo puro sin contraparte.
+
+**Aprendizaje sobre acoplamientos invisibles.** Bajar la escritura del heartbeat
+(71.435 `UPDATE` mensuales sobre la MISMA fila, para alimentar un badge) obligó
+a subir el umbral online/offline de 10 s a 75 s: si el umbral es menor que la
+ventana de escritura, todo EA vivo aparece caído. Los dos valores viven ahora
+juntos en `lib/heartbeat.ts`, en un módulo **sin imports** — ponerlos en
+`lib/tokens.ts` habría arrastrado el cliente service-role de Supabase al bundle
+del navegador al importarlos desde un componente cliente.
+
+**El defecto que introdujo la 020 y corrigió la 022, el mismo día.** El snapshot
+diario copiaba `tp_accounts` sin mirar frescura. Un EA vive dentro de
+MetaTrader: si el cliente apaga el PC, deja de reportar. Con el terminal cinco
+días caído se escribían cinco snapshots con las mismas cifras y la curva salía
+plana — indistinguible de cinco jornadas sin operar. Ahora se omite la cuenta y
+la curva muestra un **hueco**: un hueco dice "no sabemos", una línea plana
+afirma algo que ningún dato respalda. El contador `stale` que devuelve la
+función convirtió el cron diario en el detector de terminales caídos que no
+existía; el EA del operador llevaba **cinco días sin pollear** sin que saltara
+ninguna alarma.
+
+**La limitación estructural, aceptada:** el EA solo reporta con MetaTrader
+encendido. MetaApi lo habría resuelto desde el bróker, pero cobrando por cuenta.
+Para clientes que quieran continuidad, la respuesta es un **VPS de MT4**, y
+conviene decirlo en el onboarding: el mismo VPS resuelve recibir señales y tener
+el portal al día.
+
+**Aprendizaje operativo, del despliegue:** `app/layout.tsx` usa `next/font` con
+Google Fonts, así que cada build depende de una descarga externa. `staging` y
+`main` se construyeron con 100 ms de diferencia sobre el mismo árbol; staging
+consiguió la fuente y **producción agotó tres reintentos y quedó en `ERROR`**.
+El síntoma llegó disfrazado: el EA v3 recibía 405 porque producción seguía
+sirviendo el código viejo. Dejar la fuente auto-hospedada con `next/font/local`
+saca la red del camino crítico del build. **Pendiente.**
+
+**Orden de despliegue que hay que respetar.** El esquema (019–022) se aplicó
+ANTES de mergear el código, y esa dirección es la correcta: tablas nuevas sin
+código que las use son inofensivas, mientras que código que espera tablas que no
+existen falla en producción. Pero implica que el EA v3 **no se puede arrancar
+antes del despliegue**: manda `POST` y hasta que `main` no sirva el contrato
+nuevo recibe 405 en cada poll, con backoff hasta 300 s.
+
 ---
 *Documento mantenido por Pessaro Capital. Al iniciar una nueva sesión de trabajo sobre
 este proyecto, compartir este archivo como contexto inicial, junto con `CHANGELOG.md`

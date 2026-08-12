@@ -13,6 +13,7 @@ import {
   buildInviteEmail,
   buildPasswordResetEmail,
   buildClientTokenEmail,
+  buildClientRenewedEmail,
   buildClientCreatedNoticeEmail,
   type ClientEmailData,
 } from "../lib/email";
@@ -34,7 +35,10 @@ const salidas = {
   "2-acceso-actualizado": buildInviteEmail({ actionLink: "https://brige.pessaro.cl/set-password#demo", isExisting: true }),
   "3-reset-contrasena": buildPasswordResetEmail({ actionLink: "https://brige.pessaro.cl/set-password#demo" }),
   "4-token-cliente": buildClientTokenEmail({ client: cliente, token: "a".repeat(64) }),
-  "5-aviso-super-admin": buildClientCreatedNoticeEmail({
+  "5-renovacion-cliente": buildClientRenewedEmail({
+    client: { ...cliente, expiresAt: new Date(Date.now() + 14 * 86_400_000).toISOString() },
+  }),
+  "6-aviso-super-admin": buildClientCreatedNoticeEmail({
     client: cliente,
     createdBy: "operador@pessaro.cl",
     assignedAdminEmail: "admin@pessaro.cl",
