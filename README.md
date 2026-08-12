@@ -16,12 +16,16 @@ TradingView ──POST──▶ /api/webhook   (valida token + esquema Zod v2.0 
                             │
 MT4 PessaroBridgeEA ◀──GET /api/signals   (polling · consumo único · payload enriquecido)
         └──────────────POST /api/ack      (confirmación de notificación)
-Cliente ◀──────────────GET /api/signals   (mismo endpoint, token de cliente · difusión)
-        └───────────── /portal            (portal de solo lectura, sin login Supabase)
+Cliente ◀─GET|POST /api/signals   (mismo endpoint, token de cliente · difusión)
+        │      └─ el POST del EA v3 lleva telemetría de cuenta en el cuerpo
+        │         → tp_accounts · tp_open_positions · tp_trades   (sin MetaApi)
+        ├───────────── /portal            (señales entregadas — solo lectura, sin login)
+        └───────────── /portal/resumen …  (Trading Portal: cuenta, rendimiento,
+                                           operaciones, gráfico, calendario, riesgo)
 Navegador ◀──────────── /status           (panel de monitoreo, login Supabase Auth)
                     ├─── /status/tokens   (ver/regenerar TV_WEBHOOK_TOKEN, EA_TOKEN, OPERATOR_TOKEN)
                     ├─── /status/users    (invitar/gestionar usuarios del panel — solo Super Admin)
-                    └─── /status/clients  (alta/compartir/revocar tokens de cliente)
+                    └─── /status/clients  (alta/compartir/renovar/revocar tokens de cliente)
 /api/users/invite ──▶ [Resend] ──▶ email con link de "configurar contraseña" ──▶ /set-password
 /api/auth/forgot-password ──▶ [Resend] ──▶ email con link de recuperación ──▶ /set-password
 /api/clients/share ──▶ [Resend] ──▶ email con el token de cliente ──▶ /portal
@@ -34,6 +38,10 @@ Acceso al dashboard: tener sesión Supabase Auth ya no alcanza — hace falta ad
 Invitar un correo que **ya** tiene acceso reescribe su rol (`upsert`), así que la invitación tiene dos guardarraíles: no se puede cambiar el rol propio desde ahí, ni degradar al último `super_admin`. Si aun así el sistema queda sin ningún `super_admin` vivo, `/status/users` responde 403 y la única salida es fuera de la UI: `npx tsx scripts/set-user-role.ts <correo> super_admin`.
 
 **Tres roles, dos poblaciones distintas.** `super_admin` y `admin` son usuarios internos del panel (`user_roles`); `cliente` no es usuario del panel sino destinatario de señales (`client_tokens`), entra a `/portal` con su token y sin login Supabase. Los dos se dan de alta desde el mismo formulario de **Invitar usuario** (`/status/users`) porque para el operador es el mismo gesto, pero por debajo son caminos distintos: elegir rol `cliente` despliega los campos del cliente y crea su token — **no** crea cuenta en Supabase Auth ni fila en `user_roles`. Por eso `cliente` no está en `roleSchema`: si lo estuviera sería asignable desde `/api/users/role` y chocaría con el CHECK de `user_roles`. La sección **Invitación** (`/status/clients`) hace lo mismo con el formulario completo. Un `super_admin` ve el panel completo; un `admin` es redirigido a `/status/clients` y ve solo los clientes que tiene asignados, sin poder generar ni revocar tokens ni configurar el bridge — las rutas que **configuran** el bridge (`/api/settings` GET+PUT, `/api/status`, `/api/tokens`, `/api/tokens/regenerate`) exigen `super_admin`.
+
+**Todo acceso de cliente caduca (migración 019).** Un token se otorga por 7, 14 o 30 días — no hay opción indefinida — y se extiende desde `/status/clients` con **Renovar** por esos mismos plazos. Renovar **no cambia el token**: el cliente no reconfigura su EA ni recibe un secreto nuevo por correo cada mes. La vigencia nueva cuenta desde el instante de la renovación y no se acumula sobre lo que quedaba. Un token caducado se renueva; uno **revocado** no — se cortó a propósito, y devolverle el acceso es dar de alta uno nuevo. Cada token queda ligado al correo, nombre y móvil con los que se creó, y la renovación exige repetir el correo como confirmación de identidad.
+
+**Lo que llega al terminal se puede descargar (EA v2.1).** Cada señal efectiva —la que sonó y se notificó; la cuarentena no cuenta— se vuelca a CSV en `MQL4/Files`, de forma automática al archivo del día y/o manual con el botón «EXPORTAR CSV» del panel, que escribe la sesión completa.
 
 **Entrega de señales: dos colas con semánticas opuestas.** El EA del operador consume la cola (`claim_signals`, consumo único: una señal reclamada sale de la cola). Los clientes reciben por **difusión** (`claim_signals_for_client`): cada cliente recibe cada señal fresca entregable que aún no se le ha entregado, sin consumir la cola del operador. `client_deliveries` lleva una fila por señal × cliente.
 
@@ -66,8 +74,9 @@ Cada señal trae, sobrescritos por Supabase, `current_symbol_count`, `current_gl
 | `app/api/status/` | Datos que alimenta el panel `/status`. |
 | `app/api/tokens/` | GET/regenerate de los tokens de integración (solo sesión, sin fallback). |
 | `app/api/users/` | GET (lista), `invite`, `role`, `revoke` — gestión de usuarios internos, solo `super_admin`. |
-| `app/api/clients/` | GET (lista), POST (alta), `share`, `revoke` — tokens de cliente. |
+| `app/api/clients/` | GET (lista), POST (alta), `share`, `renew`, `revoke` — tokens de cliente. |
 | `app/api/portal/` | Datos del portal de cliente, autenticado por token de cliente (no por sesión). |
+| `app/api/portal/account/` | Cuenta, posiciones, historial y curva de equity del cliente en **una sola respuesta**. El navegador no habla con Supabase: sin anon key en el bundle, sin RLS del portal, sin Realtime. |
 | `app/api/cron/cleanup/` | Job diario (Vercel Cron) de limpieza/compactado de auditoría. |
 | `app/login/` | Login del dashboard (correo + contraseña, Supabase Auth), identidad visual Pessaro Capital + link "¿Olvidaste tu contraseña?". |
 | `app/api/auth/forgot-password/` | Reenvía el link de recuperación de Supabase a cuentas existentes en `user_roles` (público, no crea usuarios, no revela si un correo tiene acceso). |
@@ -77,6 +86,7 @@ Cada señal trae, sobrescritos por Supabase, `current_symbol_count`, `current_gl
 | `app/status/users/` | Invitar usuarios, cambiar rol, revocar acceso — solo `super_admin`. |
 | `app/status/clients/` | Alta de cliente (con datos de cuenta de broker), compartir por correo, revocar. |
 | `app/portal/` | Portal del cliente: su token, señales, símbolos y reporte. Solo lectura, sin login Supabase. |
+| `app/portal/(trading)/` | **Trading Portal** — resumen, rendimiento, operaciones, gráfico, calendario P&L, riesgo y cuenta. Siete páginas bajo un único proveedor de datos en el layout, de modo que navegar entre ellas no relanza ninguna petición. Grupo de rutas para que `/portal` conserve su propia pantalla. |
 | `app/theme.css` | **Única** fuente de tokens de marca (navy / púrpura / dorado, semánticos, timings). Los `.module.css` consumen `var(--…)` y no declaran hexes. |
 | `middleware.ts` | Protege `/status/*` y `/login` con la sesión de Supabase Auth. |
 | `lib/schema.ts` | Esquemas Zod del contrato JSON (webhook, ack, settings, tokens, usuarios). |
@@ -90,8 +100,14 @@ Cada señal trae, sobrescritos por Supabase, `current_symbol_count`, `current_gl
 | `lib/pessaro-logo.ts` | Logo de Pessaro Capital embebido en base64 para `/login`. |
 | `lib/auth.ts` | Gate dual (sesión con rol vigente u `OPERATOR_TOKEN`) para `/api/status` y `/api/settings`. |
 | `lib/counts.ts` | Lógica de conteo autoritativo por símbolo/global. |
-| `mt4/PessaroBridgeEA_v2.mq4` | **Expert Advisor vigente** (contrato v2.0) — notificador, sin `OrderSend`. |
-| `mt4/PessaroBridgeEA.mq4` | EA v1.0, superado por el v2.0. Se conserva solo como referencia histórica. |
+| `lib/telemetry.ts` | Contrato Zod de la telemetría del EA + verificación anti-suplantación (el número de cuenta del terminal debe coincidir con el registrado en `client_tokens`). Nunca lanza: un fallo reportando el balance no puede impedir que al trader le llegue una entrada. |
+| `lib/heartbeat.ts` | Cadencia del heartbeat y umbral online/offline. Módulo **sin imports** a propósito: lo consumen servidor y navegador, y ponerlo en `lib/tokens.ts` arrastraría el cliente service-role al bundle. |
+| `lib/portal-account.ts` | Lectura de cuenta, posiciones, historial paginado y curva de equity del Trading Portal. |
+| `lib/portal-helpers.ts` | Formato y estadística del portal (win rate, drawdown, profit factor, curva, calendario, heatmap). Funciones puras. |
+| `tradingview/TD_Confluence_LON_NY_v2.pine` | **Indicador vigente** (Pine v6, contrato v2.0) — emite `SETUP_*` además de los disparos. Se pega en TradingView; no se compila en este repo. |
+| `mt4/PessaroBridgeEA_v3.mq4` | **Expert Advisor vigente** (v3.0) — todo lo del v2.1 más la **telemetría de cuenta**, que viaja dentro del mismo poll (`POST`) en vez de abrir peticiones propias. `InpEnableSignals` / `InpEnableTelemetry` cubren cliente de solo-señales, de solo-portal o ambas. Requiere un token de **cliente**: con el `EA_TOKEN` del operador la telemetría se ignora, porque `tp_accounts` cuelga de `client_tokens`. |
+| `mt4/PessaroBridgeEA_v2.mq4` | EA v2.1 — notificador, sin `OrderSend`; exporta a CSV y comparte paleta con el indicador. Sigue funcionando indefinidamente: `/api/signals` mantiene el verbo `GET`, así que actualizar al v3 no es obligatorio para recibir señales. |
+| `mt4/PessaroBridgeEA.mq4` | EA v1.0, superado. Se conserva solo como referencia histórica. |
 | `supabase/migrations/` | Esquema SQL — **aplicar en orden**, ver más abajo. |
 | `scripts/` | `create-admin-user.ts` y `backfill-tokens.ts` (setup inicial), `set-user-role.ts` (rescate de roles). |
 | `tests/` | Suite Vitest (`rules.test.ts`) y simulador manual (`send-test-signal.ts`). |
@@ -136,7 +152,7 @@ Copiar `.env.example` a `.env.local` y completar:
 
 Generar tokens con `openssl rand -hex 32`.
 
-Migraciones SQL en `supabase/migrations/`, **aplicar en orden `001` → `015`**. Todas están aplicadas en el proyecto de producción.
+Migraciones SQL en `supabase/migrations/`, **aplicar en orden `001` → `019`**. Todas están aplicadas en producción salvo la `019`, pendiente de aplicar.
 
 | Migración | Qué agrega |
 |---|---|
@@ -158,6 +174,10 @@ Migraciones SQL en `supabase/migrations/`, **aplicar en orden `001` → `015`**.
 | `016_ephemeral_setup_suppression.sql` | Retención de armados (`settings.setup_hold_seconds`), estado `suppressed` + `signals.superseded_by`, `suppress_ephemeral_setups()` y `signal_dispatched()`. Los tres claims retienen los `SETUP_*` y suprimen las parejas efímeras; lo suprimido no consume cupo diario. |
 | `017_client_first_last_name.sql` | `client_tokens.client_last_name`; `client_name` pasa a ser el nombre de pila. Ambos `NOT NULL` con backfill `'SIN_DATO'`. |
 | `018_orphan_cancel_suppression.sql` | Una cancelación se entrega solo si hay una entrada de ese símbolo despachada y sin cerrar. `settings.suppress_orphan_cancels` como interruptor; `suppress_ephemeral_setups` pierde `p_hold_seconds`. |
+| `019_client_token_expiry_required.sql` | `client_tokens.expires_at` pasa a `NOT NULL`: desaparece la vigencia indefinida. Backfill con `now() + 30 días` (no `created_at + 30`) para no dejar vencidos en el deploy a clientes activos. |
+| `020_trading_portal.sql` | **Fusión del Trading Portal.** Tablas `tp_accounts` / `tp_trades` / `tp_open_positions` / `tp_equity_snapshots`, colgando de `client_tokens` (no de `auth.users`). `tp_ingest_telemetry()` escribe cuenta, posiciones e historial en un solo round-trip, con rate-limit atómico; `tp_snapshot_equity()` la alimenta el cron diario. Sin `tp_ohlc`, sin Realtime y sin `pg_cron` respecto del esquema original — ver la cabecera del archivo. |
+| `021_hot_path_index.sql` | Índice parcial `idx_signals_open` sobre `(ts_signal) where status in ('pending','claimed')` para el UPDATE de expiración que `claim_signals` corre en **cada** poll (~82.000/mes). `idx_signals_pending` no servía: solo cubre `pending`. `claim_signals` se recrea con una guarda `if exists` y la lógica de 016/018 intacta. |
+| `022_equity_snapshot_freshness.sql` | `tp_snapshot_equity()` omite las cuentas cuya telemetría lleva más de 26 h sin llegar, y pasa a devolver `jsonb` con `written` / `stale`. Un EA solo vive mientras MetaTrader está encendido: sin esta guarda, un terminal apagado producía snapshots diarios con cifras congeladas y una curva plana indistinguible de una jornada sin operar. El contador `stale` que registra el cron es el único aviso automático de terminales caídos. |
 
 En el dashboard de Supabase (Authentication → URL Configuration), el **Site URL** y los **Redirect URLs** deben apuntar al dominio real (`https://brige.pessaro.cl/set-password`), no a `localhost` — si quedan apuntando a localhost, los links de invitación/recuperación enviados por correo llevan a los usuarios a una URL inaccesible. Es config del dashboard de Supabase, no del código.
 
@@ -177,7 +197,7 @@ Se despliega en **Vercel** (`vercel.json` ya declara el cron diario a `/api/cron
 1. Importar el repo en Vercel y configurar las variables de entorno de la tabla anterior.
 2. Deploy.
 3. Agregar el dominio `brige.pessaro.cl` en Vercel → Domains y crear el CNAME correspondiente en el DNS de `pessaro.cl`.
-4. Configurar la alerta de TradingView apuntando a `https://brige.pessaro.cl/api/webhook?token=<TV_WEBHOOK_TOKEN>`.
+4. Pegar `tradingview/TD_Confluence_LON_NY_v2.pine` en el Pine Editor de TradingView, guardarlo y añadirlo a **un** gráfico. Crear **una sola** alerta con condición "Any alert() function call" apuntando a `https://brige.pessaro.cl/api/webhook?token=<TV_WEBHOOK_TOKEN>`, y borrar las alertas viejas del mismo indicador.
 5. Instalar y configurar `mt4/PessaroBridgeEA_v2.mq4` en el terminal MT4 (compilar en MetaEditor, habilitar WebRequest hacia el dominio, configurar `InpEaToken`, `InpExpectedAccountId`, `InpSymbolMap` y `InpBrokerToNyOffsetHours`). Si el terminal tiene cargado el v1.0, quitarlo del gráfico antes: los dos EA polleando el mismo token se roban señales entre sí, porque la cola del operador es de consumo único.
 
 Los pasos detallados (whitelisting de WebRequest, cálculo del offset horario NY↔bróker con fechas de DST, checklist end-to-end, troubleshooting) están en `docs/metaprompt_pessaro_bridge_v3_despachador.md` — no se duplican aquí para no desincronizarse.
@@ -199,13 +219,16 @@ El bridge está **completo y en producción** (`brige.pessaro.cl`) en su modo de
 9. **Datos de cuenta de broker por cliente + filtro por broker en `/status`** (migración 015).
 10. **Guardarraíles de rol en la invitación** + `scripts/set-user-role.ts` como rescate por CLI.
 11. **EA v2.0 + supresión de setups efímeros** (migración 016): el EA pasa a mostrar el tipo de orden (`BUY LIMIT`/`SELL LIMIT`), procesa y ackea los `SETUP_*`, lee el bloque `thresholds` anidado con fallback plano y escribe `s/d` en vez de `0/0`, pone en cuarentena el tráfico que no sea real, y corrige el estado ONLINE y el reloj de polling. En el bridge, las parejas armado+cancelación resueltas dentro de `setup_hold_seconds` ya no llegan al terminal.
-12. **Invitación de clientes con correos + identidad de pessaro.cl en el correo** (migración 017): nombre y apellido obligatorios, aviso por correo al cliente y a todos los super admin en cada alta, rol `cliente` en el formulario de invitar usuario, y los correos con la paleta y el footer legal calcados del sitio. `npx tsx scripts/preview-emails.ts` renderiza los 5 correos a HTML local para revisarlos sin enviar nada ni necesitar `RESEND_API_KEY`.
+12. **Invitación de clientes con correos + identidad de pessaro.cl en el correo** (migración 017): nombre y apellido obligatorios, aviso por correo al cliente y a todos los super admin en cada alta, rol `cliente` en el formulario de invitar usuario, y los correos con la paleta y el footer legal calcados del sitio. `npx tsx scripts/preview-emails.ts` renderiza los 6 correos a HTML local para revisarlos sin enviar nada ni necesitar `RESEND_API_KEY`.
+13. **Pine v2.0, exportación de señales en MT4 y caducidad obligatoria de tokens** (migración 019): el indicador pasa a emitir el **armado** del setup (ENTRADA + SL + TP1 60 % + TP2 40 %) y no solo el disparo; el EA v2.1 vuelca a CSV las señales efectivas y adopta la paleta del indicador; y los tokens de cliente pierden la vigencia indefinida — se otorgan y se renuevan por 7, 14 o 30 días, sin cambiar el token.
 
 **Modelo de roles:** se comparó con `pessaro-crm` (repo hermano, 3 roles + tabla de perfil extendido `crm_staff_profiles`) y se decidió mantener el modelo simple en Bridge, que solo gestiona acceso al panel y no un CRM con múltiples módulos de equipo. El rol `cliente` que llegó después no contradice eso: no es un usuario del panel sino un destinatario de señales, y vive en `client_tokens`, no en `user_roles`.
 
 **Pendiente / a vigilar:**
-- 🔴 **Pine v2.0 sigue sin publicarse en TradingView, y es la causa raíz de que no haya setups en MT4.** Verificado contra producción el 2026-07-29: `select count(*) from signals where action like 'SETUP%'` da **0** en todo el histórico, ningún payload trae `schema` ni `bar_time`, y `ts_signal = bar_time` (apertura de vela) en las señales más recientes → el indicador vivo es el v1.x. El bridge, la base y el EA v2.0 ya aceptan `SETUP_*`; **nada los emite**. Los pasos exactos están en `docs/PENDIENTE_PINE_v2.md`. Efecto colateral medido del mismo defecto (1-A): 149 señales rechazadas por `stale` y 215 por `duplicate`.
-- **Limpieza de alertas duplicadas en TradingView**: hay más de una alerta activa sobre el mismo indicador con "Any alert() function call", y el lote entero se reemite ~9 s después. Hoy lo tapa el índice de dedup; cuando entre Pine v2.0 dejará de taparlo (ver orden de despliegue en `007_bar_time.sql`).
+- 🔴 **Pine v2.0 está escrito pero todavía no publicado en TradingView.** El código vive en `tradingview/TD_Confluence_LON_NY_v2.pine` y ya emite `SETUP_BUY`/`SETUP_SELL`/`SETUP_CANCEL` con `bar_time` y `timestamp = timenow`; falta el paso que no se puede dar desde el repo: **pegarlo en el editor de TradingView, guardarlo y dejar una sola alerta activa.** Hasta que eso ocurra sigue vivo el v1.x y `select count(*) from signals where action like 'SETUP%'` seguirá dando 0. Checklist de publicación y verificación en `docs/PENDIENTE_PINE_v2.md`.
+- **Limpieza de alertas duplicadas en TradingView**: hay más de una alerta activa sobre el mismo indicador con "Any alert() function call", y el lote entero se reemite ~9 s después. Va **antes o junto** con la publicación del Pine v2.0 (ver orden de despliegue en `007_bar_time.sql` y en la cabecera §7 del `.pine`).
+- **Migración 019 sin aplicar en producción.** Hasta que se aplique, `client_tokens.expires_at` sigue admitiendo null y los tokens indefinidos que existan seguirán abriendo la puerta pese a que el panel ya no ofrezca esa opción al dar de alta.
+- **El EA v2.1 no se ha compilado.** Como el v2.0 en su momento: no hay MetaEditor en el entorno donde se escribió. Compilar en MetaEditor antes de subirlo a un terminal real.
 - Hasta que Pine v2.0 esté vivo, `bar_time` sigue siendo opcional con fallback y se conserva el índice de dedup viejo junto al nuevo.
 - ~~Cancelaciones huérfanas~~ — **resuelto** en la migración 018: una cancelación se entrega solo si hay una entrada de ese símbolo despachada y sin cerrar detrás. Interruptor en `/status` (`suppress_orphan_cancels`).
 - Los links de recuperación entregados por email llegaron con el token ya invalidado (`otp_expired`) en 2 intentos vía Gmail, mientras que un link generado directo funcionó a la primera — sugiere que algo en el camino de entrega (Gmail y/o el proxy de Resend) pre-visita el link de un solo uso. No investigado a fondo; si se repite con invitaciones reales, considerar que el email lleve a una página propia con un botón a clickear en vez de un link GET directo al endpoint de Supabase.

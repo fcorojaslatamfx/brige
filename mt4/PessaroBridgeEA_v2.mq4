@@ -53,6 +53,26 @@
 //  R7/R8 · Panel con identidad Pessaro Capital, gauges de cupo, contadores de
 //       sesión, `grade` e `impulse_atr` con ★ para ELITE.
 //
+//  R9 · PALETA COMPARTIDA CON EL INDICADOR (v2.1). El panel usa los MISMOS
+//       tres temas y los mismos hexes que el dashboard de TradingView
+//       (Dorado Elite · Oscuro/Cyberpunk · Azul Naval). El trader mira las dos
+//       pantallas a la vez: cuando cada una tenía su propia paleta, había que
+//       releer la leyenda para saber si un verde significaba lo mismo en las
+//       dos. Los colores sueltos que había como input se reemplazaron por
+//       InpTema — un color por input invita a combinaciones que no son ningún
+//       tema y pierden justamente la correspondencia que se buscaba.
+//
+//  R10 · EXPORTACIÓN DE LAS SEÑALES EFECTIVAS (v2.1). El panel solo muestra
+//       las últimas InpPanelMaxRows y se vacía al reiniciar el terminal: no
+//       servía para revisar la jornada ni para cruzar lo notificado contra lo
+//       operado. Ahora cada señal EFECTIVA (la que sonó y se notificó; la
+//       cuarentena no cuenta) se puede volcar a CSV en MQL4/Files:
+//         · automático — se agrega al archivo del día en cuanto llega
+//         · manual     — el botón «⤓ EXPORTAR CSV» del panel escribe un
+//                        archivo con TODA la sesión, esté o no el modo
+//                        automático activo
+//       Ver ExportHistoryToCsv() para el formato y por qué el separador es ';'.
+//
 // ── LO QUE **NO** HACE ESTE EA, Y ES DELIBERADO ──────────────────────────
 // No filtra parejas de armado+cancelación efímeras. Un setup que se arma y se
 // cancela en segundos se suprime EN EL BRIDGE (settings.setup_hold_seconds,
@@ -71,10 +91,20 @@
 //     obtener la de Nueva York (revisar 2 veces al año por el DST).
 //+------------------------------------------------------------------+
 #property copyright "Pessaro Capital"
-#property version   "2.00"
+#property version   "2.10"
 #property strict
 
-#define EA_VERSION "v2.0"
+#define EA_VERSION "v2.1"
+
+// Temas del panel. Son los mismos tres del indicador de TradingView y con los
+// mismos hexes (ver §9 de tradingview/TD_Confluence_LON_NY_v2.pine). El
+// comentario de cada miembro es lo que MT4 muestra en el desplegable.
+enum ENUM_TEMA_PESSARO
+{
+   TEMA_DORADO = 0,  // Dorado Elite
+   TEMA_CYBER  = 1,  // Oscuro / Cyberpunk
+   TEMA_NAVAL  = 2   // Azul Naval
+};
 
 // ==================== INPUTS ====================
 input string InpBridgeBaseUrl          = "https://brige.pessaro.cl"; // dominio del bridge
@@ -96,14 +126,63 @@ input bool   InpDrawChartLines         = false;   // dibuja ENTRADA/SL/TP si el 
 input int    InpPanelX                 = 12;
 input int    InpPanelY                 = 18;
 
-// Identidad Pessaro Capital
-input color  InpColorGold              = C'201,168,76';  // dorado #c9a84c
-input color  InpColorPanelBg           = C'12,15,26';    // navy #0c0f1a
-input color  InpColorBuy               = clrMediumSpringGreen;
-input color  InpColorSell              = clrTomato;
-input color  InpColorWarning           = clrGold;
-input color  InpColorMuted             = C'110,118,140';
-input color  InpColorText              = C'226,230,240';
+// Identidad visual — misma paleta que el indicador (R9)
+input ENUM_TEMA_PESSARO InpTema        = TEMA_DORADO;  // Tema del panel (igual al indicador)
+
+// Exportación de señales efectivas (R10)
+input bool   InpAutoExportCsv          = true;    // agregar cada señal al CSV del día
+input bool   InpShowExportButton       = true;    // botón «⤓ EXPORTAR CSV» en el panel
+input string InpCsvPrefix              = "PessaroBridge";  // prefijo de los archivos en MQL4/Files
+
+// ==================== PALETA (R9) ====================
+// Resueltos una vez en OnInit desde InpTema. Los hexes salen tal cual del
+// dashboard del indicador; el mapeo es: cabecera→bgHeader, fondo→bgRowEven,
+// franja alterna→bgRowOdd, acento→txtAccent. Verde, rojo y ámbar son comunes a
+// los tres temas allá y aquí: son semánticos (compra / venta / advertencia),
+// no decorativos, y cambiarlos por tema rompería la lectura.
+color g_cAccent  = C'255,215,0';
+color g_cHeader  = C'26,20,0';
+color g_cBg      = C'33,27,8';
+color g_cStripe  = C'43,36,16';
+color g_cText    = C'226,230,240';
+color g_cMuted   = C'150,150,160';
+color g_cBuy     = C'0,230,118';    // #00e676
+color g_cSell    = C'255,82,82';    // #ff5252
+color g_cWarning = C'255,183,77';   // ámbar de advertencia
+
+void ApplyTheme()
+{
+   // Comunes a los tres temas (ver comentario de arriba).
+   g_cBuy     = C'0,230,118';
+   g_cSell    = C'255,82,82';
+   g_cWarning = C'255,183,77';
+   g_cText    = C'226,230,240';
+
+   switch(InpTema)
+   {
+      case TEMA_CYBER:                 // #00ffcc / #0d1117 / #1e222d / #262b38
+         g_cAccent = C'0,255,204';
+         g_cHeader = C'13,17,23';
+         g_cBg     = C'30,34,45';
+         g_cStripe = C'38,43,56';
+         g_cMuted  = C'140,148,168';
+         break;
+      case TEMA_NAVAL:                 // #64ffda / #081426 / #122a45 / #183a5c
+         g_cAccent = C'100,255,218';
+         g_cHeader = C'8,20,38';
+         g_cBg     = C'18,42,69';
+         g_cStripe = C'24,58,92';
+         g_cMuted  = C'150,168,190';
+         break;
+      default:                         // TEMA_DORADO · #ffd700 / #1a1400 / #211b08 / #2b2410
+         g_cAccent = C'255,215,0';
+         g_cHeader = C'26,20,0';
+         g_cBg     = C'33,27,8';
+         g_cStripe = C'43,36,16';
+         g_cMuted  = C'150,150,160';
+         break;
+   }
+}
 
 // ==================== ESTADO GLOBAL ====================
 uint     g_lastPollTick    = 0;      // GetTickCount() del último poll OK (R6)
@@ -147,7 +226,19 @@ struct PanelRow
 };
 PanelRow g_rows[];
 
+// Historial de la sesión para la exportación (R10). Es un búfer APARTE del
+// panel y no un simple `InpPanelMaxRows` más grande: el panel se lee de un
+// vistazo y por eso muestra 10 filas, mientras que exportar solo esas 10
+// convertiría el botón en un adorno justo el día con mucho movimiento, que es
+// cuando se quiere el registro. El tope evita que una sesión larga crezca sin
+// límite en memoria; al llegar, se descarta la más vieja.
+#define HIST_MAX 2000
+PanelRow g_hist[];
+int      g_cntExportadas  = 0;
+string   g_lastExportFile = "";
+
 #define PANEL_PREFIX "PessaroBridge2_"
+#define PANEL_WIDTH  780
 
 // ==================== CICLO DE VIDA ====================
 int OnInit()
@@ -158,10 +249,20 @@ int OnInit()
       return INIT_PARAMETERS_INCORRECT;
    }
 
+   ApplyTheme();
    ParseSymbolMap();
    ArrayResize(g_rows, 0);
+   ArrayResize(g_hist, 0);
    g_currentInterval = InpPollActiveSeconds;
    EventSetTimer(1);
+
+   // Los rectángulos se crean ANTES de cualquier etiqueta, y en este orden:
+   // MT4 dibuja los objetos de un mismo plano en orden de creación, así que el
+   // fondo tiene que nacer primero (o taparía las franjas) y las franjas antes
+   // que las etiquetas (o taparían el texto de su fila). DrawPanel se limita
+   // después a moverlas, redimensionarlas u ocultarlas.
+   EnsureBackground(InpPanelX - 6, InpPanelY - 6, PANEL_WIDTH);
+   EnsureRowStripes();
    DrawPanel();
 
    Print("PessaroBridge ", EA_VERSION, ": iniciado en modo despachador manual — solo notifica, no envía órdenes.");
@@ -177,6 +278,19 @@ void OnDeinit(const int reason)
 void OnTick()
 {
    // Sin lógica de trading por tick: todo el trabajo ocurre en OnTimer.
+}
+
+void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
+{
+   if(id != CHARTEVENT_OBJECT_CLICK) return;
+   if(sparam != PANEL_PREFIX + "btn_csv") return;
+
+   // Un OBJ_BUTTON queda "hundido" tras el clic; sin devolverlo a false se
+   // muestra pulsado para siempre y parece que la exportación sigue en curso.
+   ObjectSetInteger(0, sparam, OBJPROP_STATE, false);
+   ChartRedraw();
+
+   ExportHistoryToCsv();
 }
 
 void OnTimer()
@@ -393,6 +507,7 @@ void HandleEntrySignal(string obj, string action)
    row.symbolGap = !brokerHasSymbol; row.quarantined = false;
    row.receivedAt = TimeLocal();
    AddPanelRow(row);
+   RecordEffective(row);
 
    if(InpDrawChartLines && brokerHasSymbol && Symbol() == symbolBroker)
       DrawLevelLines(id, price, sl, tp1, tp2);
@@ -440,6 +555,7 @@ void HandleCancelSignal(string obj, string action)
    row.exceeded = false; row.cancelled = true; row.symbolGap = false; row.quarantined = false;
    row.receivedAt = TimeLocal();
    AddPanelRow(row);
+   RecordEffective(row);
 
    RemoveLevelLines(symbolBroker);
    SendAck(id, "notified", teniaFila ? "" : "cancel_sin_armado_previo");
@@ -752,8 +868,8 @@ void EnsureBackground(int x, int y, int w)
       ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
       ObjectSetInteger(0, name, OBJPROP_BACK, false);
       ObjectSetInteger(0, name, OBJPROP_BORDER_TYPE, BORDER_FLAT);
-      ObjectSetInteger(0, name, OBJPROP_BGCOLOR, InpColorPanelBg);
-      ObjectSetInteger(0, name, OBJPROP_COLOR, InpColorGold);
+      ObjectSetInteger(0, name, OBJPROP_BGCOLOR, g_cBg);
+      ObjectSetInteger(0, name, OBJPROP_COLOR, g_cAccent);
    }
    ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
    ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
@@ -763,6 +879,65 @@ void EnsureBackground(int x, int y, int w)
 void SizeBackground(int height)
 {
    ObjectSetInteger(0, PANEL_PREFIX + "bg", OBJPROP_YSIZE, height);
+}
+
+// ---------- R9 · franjas alternas y banda de cabecera ----------
+// Reproducen la tabla del indicador: cabecera oscura arriba y filas de eventos
+// en dos tonos que se alternan. El zebrado no es adorno — con 10 filas de
+// números alineados en Consolas, es lo que impide leer el SL de una fila con
+// el TP de la de abajo.
+void EnsureRectangle(string name, color bg)
+{
+   if(ObjectFind(name) >= 0) return;
+   ObjectCreate(0, name, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetInteger(0, name, OBJPROP_BACK, false);
+   ObjectSetInteger(0, name, OBJPROP_BORDER_TYPE, BORDER_FLAT);
+   ObjectSetInteger(0, name, OBJPROP_BGCOLOR, bg);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, bg);
+}
+
+void EnsureRowStripes()
+{
+   EnsureRectangle(PANEL_PREFIX + "hdr", g_cHeader);
+   for(int i = 0; i < InpPanelMaxRows; i++)
+      EnsureRectangle(PANEL_PREFIX + "stripe" + IntegerToString(i), g_cStripe);
+
+   if(InpShowExportButton) EnsureExportButton();
+}
+
+void PlaceRectangle(string name, int x, int y, int w, int h)
+{
+   ObjectSetInteger(0, name, OBJPROP_TIMEFRAMES, OBJ_ALL_PERIODS);
+   ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
+   ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+   ObjectSetInteger(0, name, OBJPROP_XSIZE, w);
+   ObjectSetInteger(0, name, OBJPROP_YSIZE, h);
+}
+
+/** OBJ_NO_PERIODS es la forma de ocultar un objeto en MT4 sin destruirlo (y sin
+    perder el orden de creación, que es lo que mantiene el texto por encima). */
+void HideRectangle(string name)
+{
+   ObjectSetInteger(0, name, OBJPROP_TIMEFRAMES, OBJ_NO_PERIODS);
+}
+
+void EnsureExportButton()
+{
+   string name = PANEL_PREFIX + "btn_csv";
+   if(ObjectFind(name) >= 0) return;
+   ObjectCreate(0, name, OBJ_BUTTON, 0, 0, 0);
+   ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+   ObjectSetInteger(0, name, OBJPROP_XSIZE, 150);
+   ObjectSetInteger(0, name, OBJPROP_YSIZE, 20);
+   ObjectSetInteger(0, name, OBJPROP_BGCOLOR, g_cHeader);
+   ObjectSetInteger(0, name, OBJPROP_BORDER_COLOR, g_cAccent);
+   ObjectSetInteger(0, name, OBJPROP_COLOR, g_cAccent);
+   ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 8);
+   ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+   ObjectSetString(0, name, OBJPROP_FONT, "Arial Black");
+   ObjectSetString(0, name, OBJPROP_TEXT, "EXPORTAR CSV");
 }
 
 string Gauge(int count, int threshold, int width)
@@ -792,7 +967,8 @@ void DrawPanel()
    int x = InpPanelX, y = InpPanelY, lh = 15;
    int rows = ArraySize(g_rows);
    int yTop = y - 6;
-   EnsureBackground(x - 6, yTop, 780);
+   EnsureBackground(x - 6, yTop, PANEL_WIDTH);
+   PlaceRectangle(PANEL_PREFIX + "hdr", x - 6, yTop, PANEL_WIDTH, lh + 12);
 
    // ---- Cabecera ----
    int since = SecondsSinceLastPoll();
@@ -801,93 +977,117 @@ void DrawPanel()
    int tolerance = g_currentInterval * 2 + 5;
    bool online = (since >= 0 && since <= tolerance);
 
-   CreateLabel(PANEL_PREFIX + "title", "⬥ PESSARO BRIDGE · DESPACHADOR MANUAL", x, y, InpColorGold, 11, "Arial Black");
+   CreateLabel(PANEL_PREFIX + "title", "⬥ PESSARO BRIDGE · DESPACHADOR MANUAL", x, y, g_cAccent, 11, "Arial Black");
    CreateLabel(PANEL_PREFIX + "titlestate",
                (online ? "● ONLINE  " : "○ OFFLINE  ") + EA_VERSION,
-               x + 520, y, online ? InpColorBuy : InpColorSell, 10, "Arial Black");
+               x + 520, y, online ? g_cBuy : g_cSell, 10, "Arial Black");
    y += lh + 6;
 
    // ---- Estado del puente ----
-   CreateLabel(PANEL_PREFIX + "s0", "──── ESTADO DEL PUENTE ────", x, y, InpColorMuted, 8); y += lh;
+   CreateLabel(PANEL_PREFIX + "s0", "──── ESTADO DEL PUENTE ────", x, y, g_cMuted, 8); y += lh;
    CreateLabel(PANEL_PREFIX + "s1",
                StringFormat("Ventana:      %s · poll %ds",
                             IsInActiveWindow() ? "LON→NY ACTIVA" : "fuera de ventana",
                             g_currentInterval),
-               x, y, InpColorText, 8); y += lh;
+               x, y, g_cText, 8); y += lh;
    CreateLabel(PANEL_PREFIX + "s2",
                StringFormat("Último poll:  %s%s",
                             (g_lastPollLocal > 0 ? TimeToString(g_lastPollLocal, TIME_SECONDS) : "—"),
                             (since >= 0 ? StringFormat("   (hace %ds, tolerancia %ds)", since, tolerance) : "")),
-               x, y, InpColorText, 8); y += lh;
+               x, y, g_cText, 8); y += lh;
    CreateLabel(PANEL_PREFIX + "s3",
                StringFormat("Fallos:       %d%s", g_consecutiveFailures,
                             (StringLen(g_lastHttpError) > 0 ? "  · " + g_lastHttpError : "")),
-               x, y, g_consecutiveFailures > 0 ? InpColorWarning : InpColorText, 8); y += lh;
-   CreateLabel(PANEL_PREFIX + "s4", "Modo:         DESPACHADOR MANUAL · cero OrderSend", x, y, InpColorMuted, 8);
+               x, y, g_consecutiveFailures > 0 ? g_cWarning : g_cText, 8); y += lh;
+   CreateLabel(PANEL_PREFIX + "s4", "Modo:         DESPACHADOR MANUAL · cero OrderSend", x, y, g_cMuted, 8);
    y += lh + 4;
 
    // ---- Umbrales (informativos, jamás bloquean) ----
-   CreateLabel(PANEL_PREFIX + "u0", "──── UMBRALES DE CONTROL MANUAL ────", x, y, InpColorMuted, 8); y += lh;
+   CreateLabel(PANEL_PREFIX + "u0", "──── UMBRALES DE CONTROL MANUAL ────", x, y, g_cMuted, 8); y += lh;
    if(g_thHas)
    {
       CreateLabel(PANEL_PREFIX + "u1",
                   StringFormat("SÍMBOLO %-10s %s  %d/%d", g_thSymbol,
                                Gauge(g_thSymCount, g_thSymThreshold, 12), g_thSymCount, g_thSymThreshold),
-                  x, y, g_thExceeded ? InpColorWarning : InpColorText, 8); y += lh;
+                  x, y, g_thExceeded ? g_cWarning : g_cText, 8); y += lh;
       CreateLabel(PANEL_PREFIX + "u2",
                   StringFormat("CARTERA           %s  %d/%d",
                                Gauge(g_thGlbCount, g_thGlbThreshold, 12), g_thGlbCount, g_thGlbThreshold),
-                  x, y, g_thExceeded ? InpColorWarning : InpColorText, 8); y += lh;
+                  x, y, g_thExceeded ? g_cWarning : g_cText, 8); y += lh;
       CreateLabel(PANEL_PREFIX + "u3",
                   g_thExceeded ? "⚠ Umbral alcanzado — advertencia, la señal se entrega igual"
                                : "✓ Dentro de los umbrales configurados",
-                  x, y, g_thExceeded ? InpColorWarning : InpColorBuy, 8); y += lh + 4;
+                  x, y, g_thExceeded ? g_cWarning : g_cBuy, 8); y += lh + 4;
    }
    else
    {
       // R3: sin datos NO es cupo en cero. El v1.0 pintaba "0/0" y el operador
       // no podía distinguir "no he operado" de "el contrato llegó incompleto".
       CreateLabel(PANEL_PREFIX + "u1", "Sin datos de cupo todavía (el bridge los envía con cada señal)",
-                  x, y, InpColorMuted, 8); y += lh + 4;
+                  x, y, g_cMuted, 8); y += lh + 4;
    }
 
    // ---- Contadores de sesión ----
-   CreateLabel(PANEL_PREFIX + "f0", "──── FLUJO DE SEÑALES · SESIÓN ────", x, y, InpColorMuted, 8); y += lh;
+   CreateLabel(PANEL_PREFIX + "f0", "──── FLUJO DE SEÑALES · SESIÓN ────", x, y, g_cMuted, 8); y += lh;
    CreateLabel(PANEL_PREFIX + "f1",
                StringFormat("Recibidas %-4d Armados %-4d Disparos %-4d Cancel. %-4d",
                             g_cntRecibidas, g_cntSetups, g_cntDisparos, g_cntCancel),
-               x, y, InpColorText, 8); y += lh;
+               x, y, g_cText, 8); y += lh;
    CreateLabel(PANEL_PREFIX + "f2",
                StringFormat("Cuarentena %-4d Symbol-gap %-4d", g_cntCuarentena, g_cntSymbolGap),
-               x, y, (g_cntCuarentena > 0 || g_cntSymbolGap > 0) ? InpColorWarning : InpColorMuted, 8);
+               x, y, (g_cntCuarentena > 0 || g_cntSymbolGap > 0) ? g_cWarning : g_cMuted, 8);
+   y += lh + 4;
+
+   // ---- Registro en CSV (R10) ----
+   CreateLabel(PANEL_PREFIX + "c0", "──── REGISTRO DE SEÑALES EFECTIVAS ────", x, y, g_cMuted, 8); y += lh;
+   CreateLabel(PANEL_PREFIX + "c1",
+               StringFormat("Sesión %-4d  ·  automático %s%s",
+                            ArraySize(g_hist),
+                            InpAutoExportCsv ? "ON" : "OFF",
+                            (StringLen(g_lastExportFile) > 0 ? "  ·  " + g_lastExportFile : "")),
+               x, y, g_cText, 8);
+   if(InpShowExportButton)
+   {
+      // El botón se ancla a esta línea en cada repintado: el bloque de umbrales
+      // cambia de alto según haya datos de cupo o no, así que una posición fija
+      // lo dejaría montado sobre el texto la mitad del tiempo.
+      ObjectSetInteger(0, PANEL_PREFIX + "btn_csv", OBJPROP_XDISTANCE, x + PANEL_WIDTH - 172);
+      ObjectSetInteger(0, PANEL_PREFIX + "btn_csv", OBJPROP_YDISTANCE, y - 4);
+   }
    y += lh + 4;
 
    // ---- Últimos eventos ----
-   CreateLabel(PANEL_PREFIX + "e0", "──── ÚLTIMOS EVENTOS ────", x, y, InpColorMuted, 8); y += lh;
+   CreateLabel(PANEL_PREFIX + "e0", "──── ÚLTIMOS EVENTOS ────", x, y, g_cMuted, 8); y += lh;
    CreateLabel(PANEL_PREFIX + "head",
                StringFormat("%-5s %-12s %-10s %-9s %10s %10s %19s %11s %s",
                             "HORA", "ORDEN", "SÍMBOLO", "CALIDAD", "ENTRADA", "SL",
                             "TP1/TP2", "LOTES", "CUPO"),
-               x, y, InpColorMuted, 8);
+               x, y, g_cMuted, 8);
    y += lh;
 
    if(rows == 0)
    {
-      CreateLabel(PANEL_PREFIX + "row_empty", "(sin señales en esta sesión)", x, y, InpColorMuted, 8);
+      CreateLabel(PANEL_PREFIX + "row_empty", "(sin señales en esta sesión)", x, y, g_cMuted, 8);
       y += lh;
    }
 
    for(int i = 0; i < rows; i++)
    {
+      // Zebrado: la franja se pinta solo en las impares y las pares dejan ver
+      // el fondo del panel, que ya es el tono par de la tabla del indicador.
+      if(i % 2 == 1) PlaceRectangle(PANEL_PREFIX + "stripe" + IntegerToString(i), x - 6, y - 2, PANEL_WIDTH, lh);
+      else           HideRectangle(PANEL_PREFIX + "stripe" + IntegerToString(i));
+
       CreateLabel(PANEL_PREFIX + "row" + IntegerToString(i), FormatRow(g_rows[i]), x, y, RowColor(g_rows[i]), 8);
       y += lh;
    }
+   for(int i = rows; i < InpPanelMaxRows; i++) HideRectangle(PANEL_PREFIX + "stripe" + IntegerToString(i));
    PurgeExtraRowLabels(rows);
 
    // ---- Franja inferior ----
    CreateLabel(PANEL_PREFIX + "foot",
-               "Este EA solo notifica · ◇ armado = pendiente colocable · ◆ disparo = el precio ya tocó el nivel",
-               x, y + 4, InpColorGold, 7);
+               "Este EA solo notifica · ◇ armado = pendiente colocable · ◆ disparo = el precio ya tocó el nivel · CSV en MQL4/Files",
+               x, y + 4, g_cAccent, 7);
 
    // Ahora sí se conoce el alto real: hasta la franja inferior más su margen.
    SizeBackground((y + 4 + 12) - yTop + 6);
@@ -934,12 +1134,12 @@ string FormatRow(PanelRow &r)
 
 color RowColor(PanelRow &r)
 {
-   if(r.quarantined) return InpColorMuted;
-   if(r.cancelled)   return InpColorMuted;
-   if(r.exceeded)    return InpColorWarning;
+   if(r.quarantined) return g_cMuted;
+   if(r.cancelled)   return g_cMuted;
+   if(r.exceeded)    return g_cWarning;
 
    bool isBuy = (r.action == "BUY_DUAL" || r.action == "SETUP_BUY");
-   return isBuy ? InpColorBuy : InpColorSell;
+   return isBuy ? g_cBuy : g_cSell;
 }
 
 // ==================== LÍNEAS DE NIVEL ====================
@@ -956,10 +1156,10 @@ void DrawHLine(string name, double price, color clr)
 void DrawLevelLines(string id, double price, double sl, double tp1, double tp2)
 {
    string prefix = PANEL_PREFIX + "lvl_" + id + "_";
-   DrawHLine(prefix + "entry", price, InpColorGold);
-   DrawHLine(prefix + "sl",    sl,    InpColorSell);
-   DrawHLine(prefix + "tp1",   tp1,   InpColorBuy);
-   DrawHLine(prefix + "tp2",   tp2,   InpColorBuy);
+   DrawHLine(prefix + "entry", price, g_cAccent);
+   DrawHLine(prefix + "sl",    sl,    g_cSell);
+   DrawHLine(prefix + "tp1",   tp1,   g_cBuy);
+   DrawHLine(prefix + "tp2",   tp2,   g_cBuy);
 }
 
 /** Las líneas de una señal cancelada se retiran: dejarlas invita a operar algo retirado. */
@@ -971,6 +1171,188 @@ void RemoveLevelLines(string symbolBroker)
       string name = ObjectName(i);
       if(StringFind(name, PANEL_PREFIX + "lvl_") == 0) ObjectDelete(name);
    }
+}
+
+// ==================== R10 · EXPORTACIÓN DE SEÑALES EFECTIVAS ====================
+//
+// "Efectiva" = la señal que de verdad se le notificó al trader. La cuarentena
+// (R4) queda FUERA a propósito: el CSV existe para cruzar lo que se avisó
+// contra lo que se operó, y una señal descartada nunca se avisó. Lo descartado
+// ya queda registrado en el log del terminal y en la auditoría del bridge.
+//
+// Separador ';' y decimales con '.'. Es la combinación que abre en columnas en
+// un Excel con configuración regional es-CL —que espera ';' como separador de
+// lista— sin cambiar el formato numérico que usan el resto de las herramientas
+// que leen este archivo. Con ',' de separador, Excel es-CL vuelca la fila
+// entera en una sola celda.
+//
+// Los archivos se escriben en la carpeta MQL4/Files del terminal
+// (Archivo > Abrir carpeta de datos > MQL4 > Files).
+
+/** Un ';' dentro de un campo partiría la fila en dos columnas. */
+string CsvSafe(string s)
+{
+   string r = s;
+   StringReplace(r, ";", ",");
+   StringReplace(r, "\r", " ");
+   StringReplace(r, "\n", " ");
+   return r;
+}
+
+string CsvHeader()
+{
+   // 19 columnas, en el mismo orden que CsvLine.
+   return "fecha_hora;evento;accion;tipo_orden;simbolo_tv;simbolo_broker;calidad;impulso_atr;"
+          + "entrada;sl;tp1;tp2;lote_tp1;lote_tp2;cupo_simbolo;cupo_cartera;umbral_excedido;estado;signal_id";
+}
+
+string CsvEventLabel(PanelRow &r)
+{
+   if(r.isCancel) return "CANCELACION";
+   return r.isSetup ? "ARMADO" : "DISPARO";
+}
+
+/**
+ * Resultado de la notificación EN EL INSTANTE en que llegó la señal.
+ *
+ * El CSV es un registro de eventos, no un estado vivo: no se reescribe una
+ * fila ya escrita cuando después llega su cancelación, porque el archivo del
+ * día se agrega línea a línea y la fila ya está en disco. La cancelación no se
+ * pierde — entra como su propia fila CANCELACION, que es además lo que hace
+ * comparables la exportación automática y la manual.
+ */
+string CsvEstado(PanelRow &r)
+{
+   if(r.symbolGap) return "SIN_SIMBOLO_EN_BROKER";
+   return "NOTIFICADA";
+}
+
+string CsvLine(PanelRow &r)
+{
+   int dg = SymbolDigitsOrDefault(r.symbolBroker);
+
+   string cupoSym = r.hasThresholds
+      ? StringFormat("%d/%d", r.symCount, r.symThreshold) : "s/d";
+   string cupoGlb = r.hasThresholds
+      ? StringFormat("%d/%d", r.globalCount, r.globalThreshold) : "s/d";
+
+   // Las cancelaciones no traen niveles: se dejan vacías en vez de escribir
+   // ceros, que en una planilla se confunden con un precio real de 0.
+   string niveles = r.isCancel
+      ? ";;;;;"
+      : StringFormat("%s;%s;%s;%s;%s;%s",
+                     DoubleToStr(r.price, dg), DoubleToStr(r.sl, dg),
+                     DoubleToStr(r.tp1, dg), DoubleToStr(r.tp2, dg),
+                     DoubleToStr(r.lots1, 2), DoubleToStr(r.lots2, 2));
+
+   return StringFormat("%s;%s;%s;%s;%s;%s;%s;%s;%s;%s;%s;%s;%s",
+                       TimeToString(r.receivedAt, TIME_DATE | TIME_SECONDS),
+                       CsvEventLabel(r),
+                       CsvSafe(r.action),
+                       CsvSafe(r.typeLabel),
+                       CsvSafe(r.symbolTv),
+                       CsvSafe(r.symbolBroker),
+                       (StringLen(r.grade) > 0 ? CsvSafe(r.grade) : "-"),
+                       (r.impulseAtr > 0 ? DoubleToStr(r.impulseAtr, 2) : "-"),
+                       niveles,
+                       cupoSym,
+                       cupoGlb,
+                       (r.exceeded ? "SI" : "NO"),
+                       CsvEstado(r)) + ";" + CsvSafe(r.id);
+}
+
+/** Archivo del día: un CSV por cuenta y por jornada. */
+string DailyCsvName()
+{
+   return StringFormat("%s_%d_%s.csv", InpCsvPrefix, AccountNumber(),
+                       TimeToString(TimeLocal(), TIME_DATE));
+}
+
+/**
+ * Agrega una fila al archivo del día, creándolo con su cabecera si no existía.
+ *
+ * Se abre y se cierra en cada señal en vez de mantener el handle vivo: un
+ * terminal que se cierra de golpe (o un EA recargado por cambio de parámetros)
+ * dejaría el buffer sin volcar, y perder el registro de la señal que acaba de
+ * sonar es peor que el coste de abrir un archivo cada pocos minutos.
+ */
+bool CsvAppend(PanelRow &r)
+{
+   string name = DailyCsvName();
+   int h = FileOpen(name, FILE_READ | FILE_WRITE | FILE_TXT | FILE_ANSI);
+   if(h == INVALID_HANDLE)
+   {
+      Print("PessaroBridge: no se pudo abrir ", name, " para exportar (error ", GetLastError(), ")");
+      return false;
+   }
+
+   FileSeek(h, 0, SEEK_END);
+   if(FileTell(h) == 0) FileWrite(h, CsvHeader());
+   FileWrite(h, CsvLine(r));
+   FileClose(h);
+
+   g_lastExportFile = name;
+   return true;
+}
+
+/**
+ * Registra una señal efectiva: al historial de la sesión y, si el modo
+ * automático está activo, al archivo del día.
+ */
+void RecordEffective(PanelRow &r)
+{
+   int sz = ArraySize(g_hist);
+   if(sz >= HIST_MAX)
+   {
+      for(int i = 0; i < sz - 1; i++) g_hist[i] = g_hist[i + 1];
+      g_hist[sz - 1] = r;
+   }
+   else
+   {
+      ArrayResize(g_hist, sz + 1);
+      g_hist[sz] = r;
+   }
+
+   if(InpAutoExportCsv && CsvAppend(r)) g_cntExportadas++;
+}
+
+/**
+ * Volcado manual: TODA la sesión a un archivo nuevo con marca de tiempo.
+ *
+ * No reescribe el archivo del día ni depende de él: son dos vistas distintas
+ * —el diario acumula entre reinicios, este es una foto de lo que este EA lleva
+ * visto— y mezclarlas obligaría a decidir cuál gana cuando difieren.
+ */
+void ExportHistoryToCsv()
+{
+   int n = ArraySize(g_hist);
+   if(n == 0)
+   {
+      Alert("PessaroBridge: todavía no hay señales efectivas que exportar.");
+      return;
+   }
+
+   string stamp = TimeToString(TimeLocal(), TIME_DATE | TIME_MINUTES);
+   StringReplace(stamp, ".", "");
+   StringReplace(stamp, ":", "");
+   StringReplace(stamp, " ", "_");
+   string name = StringFormat("%s_%d_sesion_%s.csv", InpCsvPrefix, AccountNumber(), stamp);
+
+   int h = FileOpen(name, FILE_WRITE | FILE_TXT | FILE_ANSI);
+   if(h == INVALID_HANDLE)
+   {
+      Alert("PessaroBridge: no se pudo escribir ", name, " (error ", GetLastError(), ")");
+      return;
+   }
+
+   FileWrite(h, CsvHeader());
+   for(int i = 0; i < n; i++) FileWrite(h, CsvLine(g_hist[i]));
+   FileClose(h);
+
+   g_lastExportFile = name;
+   Print("PessaroBridge: exportadas ", n, " señales a MQL4/Files/", name);
+   Alert("PessaroBridge: ", n, " señales exportadas a MQL4/Files/", name);
+   DrawPanel();
 }
 
 // ==================== CLIENTE HTTP (WebRequest) ====================

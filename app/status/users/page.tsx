@@ -13,7 +13,7 @@ type Role = "super_admin" | "admin";
  * mismo gesto — dar de alta a alguien — pero los tipos los mantienen separados.
  */
 type InviteKind = Role | "cliente";
-type Expiry = "7d" | "14d" | "30d" | "never";
+type Expiry = "7d" | "14d" | "30d";
 
 type AdminOption = { user_id: string; email: string | null; role: string };
 
@@ -341,7 +341,6 @@ export default function UsersPage() {
                 <option value="7d">Caduca en 7 días</option>
                 <option value="14d">Caduca en 14 días</option>
                 <option value="30d">Caduca en 30 días</option>
-                <option value="never">Indefinido</option>
               </select>
             </>
           )}
