@@ -41,10 +41,22 @@ export async function GET(req: NextRequest) {
     console.error("cron: falló tp_snapshot_equity —", equityRes.error.message);
   }
 
+  // `stale` = cuentas activas que no entraron al snapshot porque su terminal
+  // lleva más de un día sin reportar (migración 022). Se registra en el log
+  // porque es el único aviso automático de que un cliente tiene MetaTrader
+  // caído: un EA solo vive mientras el terminal está encendido, y sin esta
+  // línea el operador solo se enteraría entrando a mirar badges uno a uno.
+  const equity = equityRes.data as { day: string; written: number; stale: number } | null;
+  if (equity && equity.stale > 0) {
+    console.warn(
+      `cron: ${equity.stale} cuenta(s) fuera del snapshot de equity por telemetría rancia — MetaTrader apagado`,
+    );
+  }
+
   return NextResponse.json({
     ok: true,
     expired_signals: expiredRes.data,
     compacted_audit_rows: compactedRes.data,
-    equity_snapshots: equityRes.error ? null : equityRes.data,
+    equity_snapshots: equity,
   });
 }
