@@ -5,6 +5,7 @@ import {
   settingsUpdateSchema,
   webhookPayloadSchema,
   createClientSchema,
+  renewClientSchema,
   inviteSchema,
   inviteUserSchema,
   changeRoleSchema,
@@ -12,6 +13,7 @@ import {
 } from "../lib/schema";
 import { isFresh, safeTokenEquals, toEaPayload, type SignalRow } from "../lib/counts";
 import { computeEaPollStatus, getToken, type TokenKind } from "../lib/tokens";
+import { HEARTBEAT_MIN_INTERVAL_SECONDS } from "../lib/heartbeat";
 import { computeExpiresAt, clientStatus, buildClientReport, type ClientDeliveredSignal } from "../lib/clients";
 import { supabase } from "../lib/supabase";
 import { POST as webhookPOST } from "../app/api/webhook/route";
@@ -261,6 +263,32 @@ describe("lib/schema · tokens de cliente", () => {
     expect(createClientSchema.safeParse({ ...base, account_type: "margin" }).success).toBe(false);
   });
 
+  it("§019: 'never' deja de ser una caducidad válida en el alta", () => {
+    expect(createClientSchema.safeParse({ ...base, expiry: "never" }).success).toBe(false);
+    for (const expiry of ["7d", "14d", "30d"] as const) {
+      expect(createClientSchema.safeParse({ ...base, expiry }).success).toBe(true);
+    }
+  });
+
+  it("§019: la renovación exige id + correo de confirmación + uno de los tres plazos", () => {
+    const id = crypto.randomUUID();
+    expect(renewClientSchema.safeParse({ id, client_email: "lead@ejemplo.com", expiry: "14d" }).success).toBe(true);
+    // Sin el correo no hay confirmación de identidad posible.
+    expect(renewClientSchema.safeParse({ id, expiry: "14d" }).success).toBe(false);
+    // Los plazos de renovación son los MISMOS que los del alta: renovar no
+    // puede otorgar una vigencia que el alta no permitiría.
+    expect(renewClientSchema.safeParse({ id, client_email: "lead@ejemplo.com", expiry: "never" }).success).toBe(false);
+    expect(renewClientSchema.safeParse({ id, client_email: "lead@ejemplo.com", expiry: "90d" }).success).toBe(false);
+    // El perfil no se toca al renovar: el token queda ligado a su identidad.
+    const conNombre = renewClientSchema.safeParse({
+      id,
+      client_email: "lead@ejemplo.com",
+      expiry: "7d",
+      client_name: "Otro",
+    });
+    expect(conNombre.success && "client_name" in conNombre.data).toBe(false);
+  });
+
   it("§017: nombre y apellido son obligatorios (antes el nombre era opcional)", () => {
     for (const field of ["client_name", "client_last_name"] as const) {
       const { [field]: _omit, ...rest } = base;
@@ -306,9 +334,8 @@ describe("lib/schema · invitación: usuario del panel vs cliente", () => {
 });
 
 describe("lib/clients · caducidad y estado", () => {
-  it("computeExpiresAt: 7/14/30 días desde ahora, o null para indefinido", () => {
+  it("computeExpiresAt: 7/14/30 días desde ahora (§019: ya no existe indefinido)", () => {
     const now = new Date("2026-01-01T00:00:00.000Z");
-    expect(computeExpiresAt("never", now)).toBeNull();
     expect(computeExpiresAt("7d", now)).toBe("2026-01-08T00:00:00.000Z");
     expect(computeExpiresAt("14d", now)).toBe("2026-01-15T00:00:00.000Z");
     expect(computeExpiresAt("30d", now)).toBe("2026-01-31T00:00:00.000Z");
@@ -316,10 +343,14 @@ describe("lib/clients · caducidad y estado", () => {
 
   it("clientStatus: revoked > expired > active", () => {
     const now = Date.parse("2026-01-10T00:00:00Z");
-    expect(clientStatus({ revoked_at: "2026-01-05T00:00:00Z", expires_at: null }, now)).toBe("revoked");
+    expect(clientStatus({ revoked_at: "2026-01-05T00:00:00Z", expires_at: "2026-02-01T00:00:00Z" }, now)).toBe(
+      "revoked",
+    );
     expect(clientStatus({ revoked_at: null, expires_at: "2026-01-09T00:00:00Z" }, now)).toBe("expired");
     expect(clientStatus({ revoked_at: null, expires_at: "2026-01-20T00:00:00Z" }, now)).toBe("active");
-    expect(clientStatus({ revoked_at: null, expires_at: null }, now)).toBe("active");
+    // Sin fecha NO es "vigente para siempre": es un dato que la 019 prohíbe y
+    // ante el que se cierra la puerta. Antes esta misma fila daba "active".
+    expect(clientStatus({ revoked_at: null, expires_at: null }, now)).toBe("expired");
   });
 
   it("buildClientReport: agrega por símbolo, calidad y estado", () => {
@@ -545,7 +576,9 @@ describe.skipIf(!hasLiveCreds)("reglas de negocio (integración contra Supabase 
         account_type: "demo",
         account_number: "TEST123",
         broker_server: "TESTBROKER-Demo",
-        expires_at: opts.expiresAt ?? null,
+        // Por defecto, vigente: desde la migración 019 la columna es NOT NULL
+        // y un cliente sin fecha ya no es "indefinido" sino inválido.
+        expires_at: opts.expiresAt ?? new Date(Date.now() + 30 * 86_400_000).toISOString(),
         revoked_at: opts.revoked ? new Date().toISOString() : null,
       })
       .select("id")
@@ -588,7 +621,7 @@ describe.skipIf(!hasLiveCreds)("reglas de negocio (integración contra Supabase 
     // operador ni el cliente deben verla, pero probamos que el token de cliente
     // toma su propio camino (claim_signals_for_client) sin error.
     await webhookPOST(jsonRequest(`/api/webhook?token=${TV_TOKEN}`, entryPayload(SYM_BROADCAST)));
-    const { token } = await seedClient({ expiresAt: null }); // indefinido
+    const { token } = await seedClient({});
     const res = await signalsGET(httpRequest(`/api/signals?token=${token}`));
     expect((await res.json()).ok).toBe(true);
   });
@@ -596,7 +629,7 @@ describe.skipIf(!hasLiveCreds)("reglas de negocio (integración contra Supabase 
   // ---------- Portal del cliente (solo lectura) ----------
 
   it("portal: token ACTIVO devuelve su token, señales entregadas y reporte agregado", async () => {
-    const { token, id } = await seedClient({ expiresAt: null });
+    const { token, id } = await seedClient({});
 
     // Ingesta una señal (is_test en la suite) y se le entrega directamente a
     // este cliente insertando su fila de entrega — el portal la debe listar.
@@ -731,7 +764,13 @@ describe.skipIf(!hasLiveCreds)("reglas de negocio (integración contra Supabase 
 
     expect(status.lastPollAt).toBeTruthy();
     expect(status.eaOnline).toBe(true);
-    expect(status.lastPollLatencySeconds).toBeLessThan(10);
+    // El heartbeat se persiste como mucho una vez cada
+    // HEARTBEAT_MIN_INTERVAL_SECONDS, no en cada poll: escribir en cada uno
+    // eran 71.435 UPDATE mensuales sobre la misma fila. Así que el sello puede
+    // venir de un poll anterior dentro de esa ventana, y lo que este test
+    // comprueba es que el poll deja rastro FRESCO —el bug original era que no
+    // dejaba ninguno con la cola vacía—, no que escriba cada vez.
+    expect(status.lastPollLatencySeconds).toBeLessThan(HEARTBEAT_MIN_INTERVAL_SECONDS + 5);
   });
 
   it("POST /api/ack marca notified y es idempotente en un segundo ack", async () => {

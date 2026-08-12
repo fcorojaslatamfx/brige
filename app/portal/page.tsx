@@ -142,9 +142,16 @@ export default function PortalPage() {
             {data?.client.name ? `Hola, ${data.client.name}` : "Portal del cliente"}
           </p>
         </div>
-        <button type="button" onClick={handleExit} className={styles.gateButton}>
-          Salir
-        </button>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          {/* Mismo token, misma clave de localStorage: el cliente cruza al
+              Trading Portal sin volver a autenticarse. */}
+          <a href="/portal/resumen" className={styles.gateButton} style={{ textDecoration: "none" }}>
+            Mi cuenta →
+          </a>
+          <button type="button" onClick={handleExit} className={styles.gateButton}>
+            Salir
+          </button>
+        </div>
       </header>
 
       <section className={styles.statGrid}>
