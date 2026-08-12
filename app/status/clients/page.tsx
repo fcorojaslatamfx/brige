@@ -4,12 +4,13 @@ import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { createSupabaseBrowserClient } from "@/lib/supabase-browser";
+import { EA_ONLINE_THRESHOLD_SECONDS } from "@/lib/heartbeat";
 import styles from "../status.module.css";
 
 type Role = "super_admin" | "admin";
 
 type ClientStatus = "active" | "expired" | "revoked";
-type Expiry = "7d" | "14d" | "30d" | "never";
+type Expiry = "7d" | "14d" | "30d";
 
 type ClientRow = {
   id: string;
@@ -24,6 +25,9 @@ type ClientRow = {
   broker_server: string;
   assigned_admin: string | null;
   assigned_admin_email: string | null;
+  // NOT NULL desde la migración 019, pero se sigue tipando nullable: si el
+  // código llega a producción antes que la migración, la tabla es lo único que
+  // manda y "Invalid Date" en la columna de vencimiento sería peor que decirlo.
   expires_at: string | null;
   created_by_email: string | null;
   created_at: string;
@@ -34,14 +38,20 @@ type ClientRow = {
 
 type AdminOption = { user_id: string; email: string | null; role: string };
 
-const EXPIRY_LABEL: Record<Expiry, string> = {
-  "7d": "7 días",
-  "14d": "14 días",
-  "30d": "30 días",
-  never: "Indefinido",
-};
+const EXPIRY_OPTIONS: { value: Expiry; label: string }[] = [
+  { value: "7d", label: "7 días" },
+  { value: "14d", label: "14 días" },
+  { value: "30d", label: "30 días" },
+];
 
-const ONLINE_THRESHOLD_MS = 15_000;
+const EXPIRY_DAYS: Record<Expiry, number> = { "7d": 7, "14d": 14, "30d": 30 };
+
+// Atado a HEARTBEAT_MIN_INTERVAL_SECONDS de lib/tokens.ts: el heartbeat de un
+// cliente solo se persiste una vez cada 30 s, así que un umbral menor pintaría
+// "offline" a EAs perfectamente vivos durante la mayor parte de cada ventana.
+// Se importa la constante en vez de repetir el número para que bajar la
+// cadencia de escritura no pueda dejar este badge desincronizado en silencio.
+const ONLINE_THRESHOLD_MS = EA_ONLINE_THRESHOLD_SECONDS * 1000;
 
 export default function ClientsPage() {
   const router = useRouter();
@@ -67,6 +77,10 @@ export default function ClientsPage() {
   const [assignedAdmin, setAssignedAdmin] = useState("");
   const [expiry, setExpiry] = useState<Expiry>("30d");
   const [creating, setCreating] = useState(false);
+  // Plazo elegido por fila para renovar. Fuera del estado de alta: son dos
+  // decisiones distintas y compartir el selector haría que elegir "7 días" para
+  // renovar a un cliente cambiara sin avisar el plazo del formulario de alta.
+  const [renewExpiry, setRenewExpiry] = useState<Record<string, Expiry>>({});
 
   const fetchClients = useCallback(async () => {
     try {
@@ -95,9 +109,13 @@ export default function ClientsPage() {
     router.push("/login");
   }
 
+  // 15 s en vez de 5: lo único que cambia solo en esta pantalla es el badge
+  // online/offline, y su heartbeat ya solo se persiste una vez cada 30 s
+  // (EA_ONLINE_THRESHOLD_SECONDS), así que refrescar cada 5 s consultaba tres
+  // veces por cada dato nuevo que podía existir.
   useEffect(() => {
     fetchClients();
-    const id = setInterval(fetchClients, 5000);
+    const id = setInterval(fetchClients, 15000);
     return () => clearInterval(id);
   }, [fetchClients]);
 
@@ -175,6 +193,45 @@ export default function ClientsPage() {
       else setNotice(`Token enviado a ${c.client_email}.`);
     } catch {
       setError("No se pudo enviar el correo.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleRenew(c: ClientRow) {
+    const opcion = renewExpiry[c.id] ?? "30d";
+    const hasta = new Date(Date.now() + EXPIRY_DAYS[opcion] * 86_400_000).toLocaleDateString("es-CL");
+    // El diálogo repite nombre, correo y móvil: el token está ligado a esa
+    // identidad y es lo que el operador tiene que reconocer antes de extenderle
+    // el acceso a alguien por un mes.
+    const ok = window.confirm(
+      `¿Renovar por ${EXPIRY_DAYS[opcion]} días el acceso de ${c.client_name} ${c.client_last_name}?\n\n` +
+        `Correo: ${c.client_email}\nMóvil: ${c.client_phone}\n\n` +
+        `Su token no cambia (no reconfigura su EA) y quedará vigente hasta el ${hasta}.`,
+    );
+    if (!ok) return;
+
+    setBusyId(c.id);
+    setNotice(null);
+    try {
+      const res = await fetch("/api/clients/renew", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: c.id, client_email: c.client_email, expiry: opcion }),
+      });
+      const json = await res.json();
+      if (!json.ok) {
+        setError(json.error ?? "No se pudo renovar.");
+        return;
+      }
+      setNotice(
+        json.email_warning
+          ? `Vigencia extendida hasta el ${hasta}, pero ${json.email_warning}.`
+          : `Acceso de ${c.client_email} renovado hasta el ${hasta}. Se le avisó por correo.`,
+      );
+      await fetchClients();
+    } catch {
+      setError("No se pudo renovar.");
     } finally {
       setBusyId(null);
     }
@@ -356,10 +413,11 @@ export default function ClientsPage() {
             ))}
           </select>
           <select value={expiry} onChange={(e) => setExpiry(e.target.value as Expiry)} className={styles.settingsInput}>
-            <option value="7d">Caduca en 7 días</option>
-            <option value="14d">Caduca en 14 días</option>
-            <option value="30d">Caduca en 30 días</option>
-            <option value="never">Indefinido</option>
+            {EXPIRY_OPTIONS.map((o) => (
+              <option key={o.value} value={o.value}>
+                Caduca en {o.label}
+              </option>
+            ))}
           </select>
           <button type="submit" className={styles.navLink} disabled={creating}>
             {creating ? "Enviando…" : "Invitación"}
@@ -367,8 +425,10 @@ export default function ClientsPage() {
         </form>
         <p className={styles.hint}>
           Solo el Super Admin puede invitar clientes. Al enviar, el cliente recibe su token por correo y todos los
-          Super Admin reciben un aviso del alta. Cada token pertenece a un único cliente (correo + móvil) y se
+          Super Admin reciben un aviso del alta. Cada token pertenece a un único cliente (correo + nombre + móvil) y se
           configura en el campo <span className={styles.mono}>InpEaToken</span> del EA de MetaTrader del cliente.
+          Todo acceso caduca: se otorga por 7, 14 o 30 días y se extiende con <strong>Renovar</strong> por esos mismos
+          plazos, sin cambiar el token ni la identidad a la que quedó ligado.
         </p>
       </section>
       )}
@@ -445,9 +505,7 @@ export default function ClientsPage() {
                     Copiar
                   </button>
                 </td>
-                <td className={styles.mono}>
-                  {c.expires_at ? new Date(c.expires_at).toLocaleDateString("es-CL") : "Indefinido"}
-                </td>
+                <td className={styles.mono}>{formatExpiry(c.expires_at)}</td>
                 <td>
                   <StatusBadge status={c.status} />
                 </td>
@@ -464,15 +522,45 @@ export default function ClientsPage() {
                       Compartir
                     </button>
                     {isSuper && (
-                      <button
-                        type="button"
-                        onClick={() => handleRevoke(c)}
-                        className={styles.gateButton}
-                        style={{ padding: "4px 10px", fontSize: 11 }}
-                        disabled={busyId === c.id || c.status === "revoked"}
-                      >
-                        Revocar
-                      </button>
+                      <>
+                        <select
+                          value={renewExpiry[c.id] ?? "30d"}
+                          onChange={(e) =>
+                            setRenewExpiry((prev) => ({ ...prev, [c.id]: e.target.value as Expiry }))
+                          }
+                          className={styles.settingsInput}
+                          style={{ padding: "2px 4px", fontSize: 11 }}
+                          disabled={c.status === "revoked"}
+                          aria-label={`Plazo de renovación para ${c.client_email}`}
+                        >
+                          {EXPIRY_OPTIONS.map((o) => (
+                            <option key={o.value} value={o.value}>
+                              {o.label}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => handleRenew(c)}
+                          className={styles.gateButton}
+                          style={{ padding: "4px 10px", fontSize: 11 }}
+                          // Un token caducado SÍ se renueva: es el caso normal.
+                          // Uno revocado no — se cortó a propósito y se devuelve
+                          // el acceso dando de alta uno nuevo.
+                          disabled={busyId === c.id || c.status === "revoked"}
+                        >
+                          Renovar
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleRevoke(c)}
+                          className={styles.gateButton}
+                          style={{ padding: "4px 10px", fontSize: 11 }}
+                          disabled={busyId === c.id || c.status === "revoked"}
+                        >
+                          Revocar
+                        </button>
+                      </>
                     )}
                   </div>
                 </td>
@@ -500,6 +588,21 @@ function StatusBadge({ status }: { status: ClientStatus }) {
   };
   const m = map[status];
   return <span className={`${styles.badge} ${styles[m.cls as keyof typeof styles]}`}>{m.label}</span>;
+}
+
+/**
+ * Fecha de vencimiento + cuánto queda.
+ *
+ * Los días restantes son el dato que decide si hay que renovar; una fecha suelta
+ * obliga a calcularlo mentalmente fila por fila.
+ */
+function formatExpiry(iso: string | null): string {
+  if (!iso) return "sin fecha — renovar";
+  const fecha = new Date(iso).toLocaleDateString("es-CL");
+  const dias = Math.ceil((new Date(iso).getTime() - Date.now()) / 86_400_000);
+  if (dias < 0) return `${fecha} (vencido)`;
+  if (dias === 0) return `${fecha} (hoy)`;
+  return `${fecha} (${dias}d)`;
 }
 
 function formatPoll(iso: string | null): string {

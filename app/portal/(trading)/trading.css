@@ -1,0 +1,71 @@
+/*
+ * Tokens del Trading Portal.
+ *
+ * Extraídos de pessaro-trading-portal/design/apptradingpessarocapital/
+ * ui_kits/trading-app/tokens.css — paleta "indigo", la que el design system
+ * marca como Pessaro Corporate Futurism por defecto — más la semántica de
+ * ganancia/pérdida del bloque [data-pnl="mint-red"].
+ *
+ * Solo se traen los tokens que consume lib/portal-helpers.ts. El resto del
+ * kit son clases de una app móvil (.tapp .sheet, .book .cell…) que este
+ * portal no usa; copiarlas enteras habría metido 400 líneas de CSS muerto.
+ *
+ * Vive aparte de app/theme.css a propósito: aquel es la paleta del BRIDGE
+ * (púrpura y dorado de pessaro.cl, para /status y /login) y esta es la del
+ * PORTAL. Son dos productos con dos identidades, servidos por el mismo
+ * despliegue; fundirlas obligaría a que uno de los dos cediera su marca.
+ */
+
+.tradingPortal {
+  --app-bg: oklch(0.12 0.03 260);
+  --app-surface: oklch(0.15 0.04 260);
+  --app-surface-2: oklch(0.18 0.05 260);
+  --app-surface-3: oklch(0.22 0.06 260);
+  --app-border: oklch(0.24 0.06 260);
+  --app-text: oklch(0.95 0.01 0);
+  --app-muted: oklch(0.65 0.04 260);
+  --app-muted-2: oklch(0.55 0.04 260);
+  --app-primary: oklch(0.55 0.25 290);
+  --app-primary-2: oklch(0.62 0.22 290);
+  --app-accent: oklch(0.78 0.18 160);
+  --app-trust: oklch(0.65 0.20 220);
+  --app-warn: oklch(0.70 0.18 50);
+  --app-grid: oklch(0.22 0.06 260);
+
+  /* Semántica P&L — mint / rojo-naranja */
+  --app-up: oklch(0.72 0.20 150);
+  --app-up-bg: oklch(0.72 0.20 150 / 0.16);
+  --app-down: oklch(0.65 0.22 25);
+  --app-down-bg: oklch(0.65 0.22 25 / 0.16);
+
+  --font-sans: "Plus Jakarta Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  color-scheme: dark;
+  color: var(--app-text);
+  font-family: var(--font-sans);
+}
+
+.tradingPortal h1,
+.tradingPortal h2 {
+  font-family: var(--font-sans);
+}
+
+.tradingPortal button,
+.tradingPortal input {
+  font-family: inherit;
+}
+
+/* Scrollbar acorde con la superficie oscura; por defecto Chrome pinta una
+   barra clara que corta el panel en dos. */
+.tradingPortal *::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.tradingPortal *::-webkit-scrollbar-track {
+  background: transparent;
+}
+.tradingPortal *::-webkit-scrollbar-thumb {
+  background: var(--app-surface-3);
+  border-radius: 4px;
+}

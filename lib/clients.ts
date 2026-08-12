@@ -1,10 +1,18 @@
 import { randomBytes } from "node:crypto";
 import { supabase } from "./supabase";
+import { HEARTBEAT_MIN_INTERVAL_SECONDS } from "./heartbeat";
 
-/** Opciones de caducidad ofrecidas al generar un token de cliente. */
-export type ClientExpiry = "7d" | "14d" | "30d" | "never";
+/**
+ * Opciones de caducidad de un token de cliente, al crearlo y al renovarlo.
+ *
+ * No existe "indefinido" (ver clientExpirySchema): todo acceso vence. Los tres
+ * plazos son los mismos en las dos operaciones a propósito — un plazo de
+ * renovación que no se pudiera otorgar en el alta sería una puerta trasera para
+ * dar vigencias que el alta no permite.
+ */
+export type ClientExpiry = "7d" | "14d" | "30d";
 
-export const EXPIRY_DAYS: Record<Exclude<ClientExpiry, "never">, number> = {
+export const EXPIRY_DAYS: Record<ClientExpiry, number> = {
   "7d": 7,
   "14d": 14,
   "30d": 30,
@@ -43,16 +51,27 @@ const CACHE_TTL_MS = 5_000;
 type CachedClient = { row: ClientTokenRow | null; expiresAt: number };
 const tokenCache = new Map<string, CachedClient>();
 
-/** Calcula el instante de expiración a partir de la opción elegida (null = indefinido). */
-export function computeExpiresAt(expiry: ClientExpiry, now = new Date()): string | null {
-  if (expiry === "never") return null;
+/**
+ * Instante de expiración: SIEMPRE a partir de ahora, nunca acumulando sobre la
+ * vigencia que quedaba.
+ *
+ * "Renovar por 14 días" significa que el cliente tiene 14 días por delante, y
+ * eso es lo que dice el correo que se le manda. Sumar el plazo al vencimiento
+ * anterior haría que dos renovaciones seguidas por descuido dejaran un acceso
+ * abierto meses más allá de lo que nadie decidió.
+ */
+export function computeExpiresAt(expiry: ClientExpiry, now = new Date()): string {
   const ms = EXPIRY_DAYS[expiry] * 24 * 60 * 60 * 1000;
   return new Date(now.getTime() + ms).toISOString();
 }
 
 export function clientStatus(row: Pick<ClientTokenRow, "revoked_at" | "expires_at">, nowMs = Date.now()): ClientStatus {
   if (row.revoked_at) return "revoked";
-  if (row.expires_at && new Date(row.expires_at).getTime() <= nowMs) return "expired";
+  // El `!row.expires_at` no puede pasar desde la migración 019 (la columna es
+  // NOT NULL), pero un null aquí significaría "sin fecha de término" y esta
+  // función es la que decide si un token sigue abriendo la puerta: ante un dato
+  // que no debería existir, cerrar.
+  if (!row.expires_at || new Date(row.expires_at).getTime() <= nowMs) return "expired";
   return "active";
 }
 
@@ -148,6 +167,38 @@ export async function getClientToken(id: string): Promise<ClientTokenRow | null>
   return data as ClientTokenRow;
 }
 
+/**
+ * Extiende la vigencia de un token existente. Devuelve la fila actualizada.
+ *
+ * Solo renueva lo que NO está revocado (`.is("revoked_at", null)`), y esa
+ * condición va en el UPDATE y no en una comprobación previa: entre leer y
+ * escribir cabe una revocación de otro operador, y el orden "leo activo →
+ * revocan → escribo vigencia nueva" devolvería el acceso a alguien a quien
+ * acaban de cortárselo. Una revocación es una decisión de seguridad: se
+ * deshace dando de alta un token nuevo, no alargando el revocado.
+ *
+ * El token en sí NO cambia — el cliente no tiene que volver a configurar su EA
+ * ni recibir un secreto nuevo por correo. Se renueva la vigencia, no la
+ * credencial.
+ */
+export async function renewClientToken(id: string, expiry: ClientExpiry): Promise<ClientTokenRow | null> {
+  const { data, error } = await supabase
+    .from("client_tokens")
+    .update({ expires_at: computeExpiresAt(expiry) })
+    .eq("id", id)
+    .is("revoked_at", null)
+    .select("*")
+    .maybeSingle();
+  if (error) throw new Error(`No se pudo renovar el token de cliente: ${error.message}`);
+  if (!data) return null;
+
+  // La caché de resolución guarda la fila vieja hasta 5 s; un token que acaba
+  // de renovarse seguiría respondiendo 403 "caducado" durante ese rato.
+  const row = data as ClientTokenRow;
+  tokenCache.delete(row.token);
+  return row;
+}
+
 export async function revokeClientToken(id: string): Promise<void> {
   const { data, error } = await supabase
     .from("client_tokens")
@@ -177,9 +228,22 @@ export async function resolveClientToken(token: string): Promise<ClientTokenRow 
   return row;
 }
 
-/** Heartbeat: marca el último poll del EA del cliente (para el badge online/offline del panel). */
+/**
+ * Heartbeat: marca el último poll del EA del cliente (para el badge
+ * online/offline del panel).
+ *
+ * La condición de antigüedad va dentro del UPDATE, no en una comprobación
+ * previa: así no hace falta un SELECT extra y dos polls concurrentes del mismo
+ * EA no pueden colarse los dos. Cuando no toca escribir, la sentencia afecta a
+ * cero filas y no genera WAL.
+ */
 export async function touchClientUsage(id: string): Promise<void> {
-  await supabase.from("client_tokens").update({ last_used_at: new Date().toISOString() }).eq("id", id);
+  const cutoff = new Date(Date.now() - HEARTBEAT_MIN_INTERVAL_SECONDS * 1000).toISOString();
+  await supabase
+    .from("client_tokens")
+    .update({ last_used_at: new Date().toISOString() })
+    .eq("id", id)
+    .or(`last_used_at.is.null,last_used_at.lt.${cutoff}`);
 }
 
 // ---------- Portal del cliente (solo lectura, sin configuración) ----------
