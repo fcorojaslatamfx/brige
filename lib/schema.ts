@@ -132,8 +132,16 @@ export const tokenKindSchema = z.enum(["tv_webhook", "ea", "operator"]);
 export const tokenRegenerateSchema = z.object({ kind: tokenKindSchema });
 export type TokenKindInput = z.infer<typeof tokenKindSchema>;
 
-/** Caducidad de un token de cliente (ver lib/clients.ts). */
-export const clientExpirySchema = z.enum(["7d", "14d", "30d", "never"]);
+/**
+ * Caducidad de un token de cliente (ver lib/clients.ts).
+ *
+ * Sin opción "indefinido": todo acceso de cliente vence, y solo en 7, 14 o 30
+ * días. Un token sin fecha de término solo se corta si alguien se acuerda de
+ * revocarlo, y lo que no tiene fecha no se revisa nunca. El mismo enum
+ * gobierna el alta y la renovación, así que no hay forma de renovar por un
+ * plazo que no se pueda otorgar en el alta.
+ */
+export const clientExpirySchema = z.enum(["7d", "14d", "30d"]);
 
 /**
  * Perfil del cliente SIN el correo, compartido por los dos caminos de alta:
@@ -220,6 +228,27 @@ export type CreateClientInput = z.infer<typeof createClientSchema>;
 
 /** Body de POST /api/clients/revoke. */
 export const revokeClientSchema = z.object({ id: z.string().uuid() });
+
+/**
+ * Body de POST /api/clients/renew: extender la vigencia de un token existente.
+ *
+ * Lleva `client_email` además del `id` y NO es redundante: es la confirmación
+ * de identidad del token. El panel se refresca cada 5 s, así que la fila que el
+ * operador tenía en pantalla al pulsar "Renovar" puede no ser la que está bajo
+ * ese `id` cuando llega el request. Renovar por 30 días el acceso del cliente
+ * equivocado es silencioso — nadie ve un error — y por eso el servidor exige
+ * que el correo coincida con el de la fila antes de tocar nada.
+ *
+ * La renovación NO acepta nombre, móvil ni datos de cuenta: el token queda
+ * ligado a la identidad con la que se creó. Cambiar a quién pertenece un token
+ * vivo es un alta nueva, no una renovación.
+ */
+export const renewClientSchema = z.object({
+  id: z.string().uuid(),
+  client_email: z.string().email(),
+  expiry: clientExpirySchema,
+});
+export type RenewClientInput = z.infer<typeof renewClientSchema>;
 
 /** Body de POST /api/clients/share: reenviar el token de cliente por correo. */
 export const shareClientSchema = z.object({ id: z.string().uuid() });

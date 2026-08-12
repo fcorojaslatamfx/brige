@@ -94,7 +94,17 @@ type SettingsForm = Partial<
   >
 >;
 
-const REFRESH_MS = 5000;
+/**
+ * Cada refresco de esta página dispara NUEVE consultas en paralelo en
+ * /api/status —dos de ellas RPC agregados sobre una ventana de 48 h—, así que
+ * a 5 s eran ~6.500 consultas por hora y por pestaña abierta, y el panel se
+ * queda abierto toda la jornada.
+ *
+ * A 15 s son ~2.200. No se puede cachear en el edge para amortiguarlo: la ruta
+ * está autenticada por cookie y una respuesta compartida podría acabar en
+ * manos de quien no debe verla.
+ */
+const REFRESH_MS = 15000;
 
 export default function StatusPage() {
   const router = useRouter();

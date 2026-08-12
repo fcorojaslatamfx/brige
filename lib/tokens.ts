@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { supabase } from "./supabase";
+import { HEARTBEAT_MIN_INTERVAL_SECONDS, EA_ONLINE_THRESHOLD_SECONDS } from "./heartbeat";
 
 export type TokenKind = "tv_webhook" | "ea" | "operator";
 
@@ -49,13 +50,25 @@ export async function listTokens(): Promise<TokenRow[]> {
  * haya o no trabajo real que hacer. Independiente de `updated_at`
  * (rotación) — es lo que /api/status usa para "último poll"/online-offline,
  * en vez de inferirlo de efectos secundarios como signals.claimed_at.
+ *
+ * El UPDATE lleva su propia condición de antigüedad en vez de una
+ * comprobación previa en JS: leer-y-luego-escribir necesitaría un SELECT
+ * extra y tendría una carrera entre polls concurrentes, y una caché en
+ * memoria del proceso no sirve porque las instancias serverless se reciclan
+ * constantemente (es lo mismo que ya derrota a la caché de 5 s de getToken).
  */
 export async function touchTokenUsage(kind: TokenKind): Promise<void> {
-  const { error } = await supabase.from("tokens").update({ last_used_at: new Date().toISOString() }).eq("kind", kind);
+  const cutoff = new Date(Date.now() - HEARTBEAT_MIN_INTERVAL_SECONDS * 1000).toISOString();
+  const { error } = await supabase
+    .from("tokens")
+    .update({ last_used_at: new Date().toISOString() })
+    .eq("kind", kind)
+    // `is.null` cubre el primer poll tras crear o regenerar un token: un
+    // comparador de orden nunca casa contra NULL, y sin esta rama el badge de
+    // un token recién rotado se quedaría en "offline" para siempre.
+    .or(`last_used_at.is.null,last_used_at.lt.${cutoff}`);
   if (error) throw new Error(`No se pudo registrar el uso del token: ${error.message}`);
 }
-
-const EA_ONLINE_THRESHOLD_SECONDS = 10;
 
 export type EaPollStatus = {
   lastPollAt: string | null;
