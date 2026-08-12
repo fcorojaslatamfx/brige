@@ -174,7 +174,7 @@ refresco y por pestaña abierta).
   señales de prueba en producción. Se adaptó el test del heartbeat, que asumía
   el umbral de 10 s.
 
-### Pine v2.0, exportación de señales en MT4 y caducidad obligatoria de tokens · 03-ago-2026
+### Pine v2.0, exportación de señales en MT4 y caducidad obligatoria de tokens · `e824212` · 03-ago-2026
 
 Tres frentes de una misma petición: que el **setup** que el indicador dibuja
 (ENTRADA + SL + TP1 60 % + TP2 40 %) llegue al terminal, que lo que llegó se
